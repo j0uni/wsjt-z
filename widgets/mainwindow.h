@@ -95,6 +95,7 @@ class WSPRBandHopping;
 // Z
 class UnfilteredView;
 class PSKReporterWidget;
+class QSOMonitorWindow;
 
 class HelpTextWindow;
 class WSPRNet;
@@ -442,6 +443,7 @@ private slots:
      int watchdog();
      void on_actionUnfiltered_View_triggered();
      void on_actionPSKReporter_triggered();
+     void on_actionQSO_Monitor_triggered();
      void updateQsoCounter(bool increment);
      void on_txFirstCheckBox_toggled();
 
@@ -489,6 +491,12 @@ private:
   void switchBand(int row);
   void ZMessage();
   void ZProcess();
+  QString qso_progress_text () const;
+  void update_qso_monitor ();
+  void update_qso_monitor_station_cache (QString const& call, QString const& grid);
+  void append_qso_monitor_log (QString const& category, QString const& detail);
+  void set_qso_monitor_decision (QString const& action, QString const& reason);
+  void clear_qso_monitor_log ();
 
   // Filter cache: parsed once when the QPlainTextEdit changes, reused per-decode.
   // Invalidated by textChanged signals connected in the ctor.
@@ -740,6 +748,7 @@ private:
   bool    m_autoModeSwitch = false;
   QScopedPointer<UnfilteredView> m_unfilteredView;
   QScopedPointer<PSKReporterWidget> m_pskReporterView;
+  QScopedPointer<QSOMonitorWindow> m_qsoMonitorView;
   QThread * m_pskReporterThread;
   QDateTime m_ignoreListReset;
   qint64 m_msTxFirst;
@@ -749,7 +758,27 @@ private:
   int qso_new = 0;
   QByteArray m_unfilteredViewGeometry;
   QByteArray m_pskReporterViewGeometry;
-  
+  QByteArray m_qsoMonitorViewGeometry;
+
+  struct QsoMonitorStationSnapshot
+  {
+    QString call;
+    QString grid;
+    QString distance;
+    QString bearing;
+    QString country;
+    QString continent;
+    QString cq_zone;
+    QString itu_zone;
+    QString state;
+  };
+
+  QsoMonitorStationSnapshot m_qsoMonitorStation;
+  QStringList m_qsoMonitorEntries;
+  QString m_qsoMonitorLastEntry;
+  QString m_qsoMonitorLastAction;
+  QString m_qsoMonitorLastReason;
+
   enum
     {
       CALLING,

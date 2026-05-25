@@ -219,6 +219,7 @@ set (wsjt_qt_CXXSRCS
   Network/NetworkMessage.cpp
   Network/MessageClient.cpp
   widgets/LettersSpinBox.cpp
+  widgets/QSOMonitorWindow.cpp
   widgets/HintedSpinBox.cpp
   widgets/RestrictedSpinBox.cpp
   widgets/HelpTextWindow.cpp
@@ -867,25 +868,10 @@ set (PALETTE_FILES
 )
 
 if (APPLE)
-  set (WSJTX_ICON_FILE ${CMAKE_PROJECT_NAME}.icns)
-  set (ICONSRCS
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_16x16.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_16x16@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_32x32.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_32x32@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_256x256.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_256x256@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_512x512.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_512x512@2x.png
-    )
-  add_custom_command (
-    OUTPUT ${WSJTX_ICON_FILE}
-    COMMAND iconutil -c icns --output "${CMAKE_BINARY_DIR}/${WSJTX_ICON_FILE}" "${CMAKE_SOURCE_DIR}/icons/Darwin/${CMAKE_PROJECT_NAME}.iconset"
-    DEPENDS ${ICONSRCS}
-    COMMENT "Building Icons"
-    )
+  # iconutil rejects the checked-in iconset on some newer macOS setups even
+  # though the PNGs are present and dimensionally correct. Use the bundled PNG
+  # directly so local builds still produce a runnable app bundle.
+  set (WSJTX_ICON_FILE icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128.png)
 else ()
   set (WSJTX_ICON_FILE icons/windows-icons/wsjtx.ico)
 endif (APPLE)

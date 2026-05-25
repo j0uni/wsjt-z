@@ -1,4 +1,5 @@
 SOURCES += \
+  $$PWD/QSOMonitorWindow.cpp \
   $$PWD/pskreporterwidget.cpp \
   $$PWD/unfilteredview.cpp \
   widgets/astro.cpp widgets/LettersSpinBox.cpp \
@@ -17,6 +18,7 @@ SOURCES += \
   widgets/LazyFillComboBox.cpp widgets/CheckableItemComboBox.cpp
 
 HEADERS  += \
+  $$PWD/QSOMonitorWindow.hpp \
   $$PWD/pskreporterwidget.h \
   $$PWD/unfilteredview.h \
   widgets/mainwindow.h widgets/plotter.h \

@@ -57,6 +57,7 @@
 #include <QSqlQuery>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include "QSOMonitorWindow.hpp"
 #include "unfilteredview.h"
 #include "pskreporterwidget.h"
 
@@ -1590,6 +1591,7 @@ void MainWindow::writeSettings()
   m_settings->setValue ("darkMode", ui->actionDark_mode->isChecked());
   m_settings->setValue ("rawViewDisplayed", m_unfilteredView && m_unfilteredView->isVisible ());
   m_settings->setValue ("pskViewDisplayed", m_pskReporterView && m_pskReporterView->isVisible ());
+  m_settings->setValue ("qsoMonitorDisplayed", m_qsoMonitorView && m_qsoMonitorView->isVisible ());
   m_settings->setValue ("txFirstLock",  m_TxFirstLock);
 
   if (m_unfilteredView && m_unfilteredView->isVisible ()) {
@@ -1598,6 +1600,10 @@ void MainWindow::writeSettings()
 
   if (m_pskReporterView && m_pskReporterView->isVisible ()) {
       m_settings->setValue ("pskViewGeometry", m_pskReporterView->saveGeometry() );
+  }
+
+  if (m_qsoMonitorView && m_qsoMonitorView->isVisible ()) {
+      m_settings->setValue ("qsoMonitorGeometry", m_qsoMonitorView->saveGeometry() );
   }
 
   // Misc tab
@@ -1827,8 +1833,10 @@ void MainWindow::readSettings()
   ui->tx1->setEnabled(m_settings->value("tx1State", true).toBool());
   m_unfilteredViewGeometry = m_settings->value("rawViewGeometry").toByteArray();
   m_pskReporterViewGeometry = m_settings->value("pskViewGeometry").toByteArray();
+  m_qsoMonitorViewGeometry = m_settings->value("qsoMonitorGeometry").toByteArray();
   auto showRawView =m_settings->value("rawViewDisplayed", false).toBool();
   auto showPskView =m_settings->value("pskViewDisplayed", false).toBool();
+  auto showQsoMonitor =m_settings->value("qsoMonitorDisplayed", false).toBool();
   m_TxFirstLock = m_settings->value("txFirstLock", false).toBool();
 
 
@@ -1934,6 +1942,10 @@ void MainWindow::readSettings()
   // Z
   if (showRawView) on_actionUnfiltered_View_triggered();
   if (showPskView) on_actionPSKReporter_triggered();
+  if (showQsoMonitor) {
+    ui->actionQSO_Monitor->setChecked (true);
+    on_actionQSO_Monitor_triggered ();
+  }
   if (m_TxFirstLock) ui->txFirstCheckBox->setStyleSheet("background-color: #ff0000;");
 }
 
@@ -6633,6 +6645,7 @@ void MainWindow::guiUpdate()
   if(m_tci_audio) {
     Q_EMIT m_config.transceiver_volume(m_config.volume());
   }
+  update_qso_monitor ();
 }               //End of guiUpdate
 
 void MainWindow::useNextCall()
@@ -7916,6 +7929,7 @@ void MainWindow::clearDX ()
     ui->txrb6->setChecked(true);
   }
   m_QSOProgress = CALLING;
+  update_qso_monitor ();
 }
 
 void MainWindow::lookup()
@@ -13031,15 +13045,20 @@ void MainWindow::on_cbAutoCall_toggled(bool b)
         ui->cb_filtering->setEnabled(false);
         resetAutoSwitch();
         if (!m_autoModeSwitch) clearDX();
+        append_qso_monitor_log ("Auto Call", "Enabled. CQ-only filtering and new-on-band guardrails are active.");
+        set_qso_monitor_decision ("Auto Call enabled", "Waiting for a CQ or RR73 that passes the current filters.");
     } else {
         ui->cbCQonly->setEnabled(true);
         ui->cbAutoCQ->setEnabled(true);
         ui->cb_callB4onBand->setEnabled(true);
         ui->cb_filtering->setEnabled(true);
+        append_qso_monitor_log ("Auto Call", "Disabled.");
+        set_qso_monitor_decision ("Auto Call disabled", QString {});
     }
 
     auto_tx_mode(false);
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 void MainWindow::on_cbAutoCQ_toggled(bool b)
@@ -13052,12 +13071,17 @@ void MainWindow::on_cbAutoCQ_toggled(bool b)
         ui->txrb6->setChecked(true);
         resetAutoSwitch();
         if (!m_autoModeSwitch) clearDX();
+        append_qso_monitor_log ("Auto CQ", "Enabled. The station will call CQ automatically until the counter expires.");
+        set_qso_monitor_decision ("Auto CQ enabled", "Ready to transmit CQ on the next cycle.");
     } else {
         ui->cbAutoCall->setEnabled(true);
+        append_qso_monitor_log ("Auto CQ", "Disabled.");
+        set_qso_monitor_decision ("Auto CQ disabled", QString {});
     }
 
     auto_tx_mode(b);
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 void MainWindow::on_btn_addToIgnore_clicked( ) {
@@ -13113,6 +13137,13 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     bool matched = false;
     bool cqTargetPreferMode = (ui->cb_ignoreCQTarget->currentIndex() == 4);
     bool cqTargetPreferMatch = false;
+    auto automation_active = [this] {
+        return ui->cbAutoCall->isChecked() || ui->cbAutoCQ->isChecked() || ui->cb_autoCallNext->isChecked();
+    };
+    auto monitor_skip = [this, &automation_active, &dxCall] (QString const& reason) {
+        if (!automation_active() || dxCall.isEmpty()) return;
+        append_qso_monitor_log ("Candidate", QString {"Skipped %1: %2"}.arg (dxCall, reason));
+    };
 
     if (m_zdebug) log("callsignFiltered: ENTRY");
 
@@ -13132,11 +13163,13 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
     if (!dxCall.contains(kReDigit) || dxCall.length() < 3) {
         if (m_zdebug) log("callsignFiltered: Invalid callsign. Skipping.");
+        monitor_skip ("invalid callsign");
         return true;
     }
 
     if (dxCall.endsWith("/R")) {
         if (m_zdebug) log("callsignFiltered: False decode (ends with /R). Skipping.");
+        monitor_skip ("false decode ending with /R");
         return true;
     }
 
@@ -13149,6 +13182,7 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
               if (m_TxFirstLock && (ui->txFirstCheckBox->isChecked() != m_txFirst)) {
                 if (m_zdebug) log("callsignFiltered: TX First Lock. Pounce cancelled.");
+                monitor_skip ("TX First lock does not match the candidate");
                 return false;
               } else {
                   m_priorityCall = dxCall;
@@ -13157,6 +13191,8 @@ bool MainWindow::callsignFiltered(DecodedText dt)
                   m_prioTxFirst=(nmod!=0);
                   m_prioGrid  = dxGrid;
                   if (m_zdebug) log("callsignFiltered: Pounce mode");
+                  append_qso_monitor_log ("Pounce", QString {"Armed %1 for the next free cycle."}.arg (dxCall));
+                  set_qso_monitor_decision ("Pounce target armed", QString {"The selected station %1 is still available for a response."}.arg (dxCall));
                   return false;
               }
           }
@@ -13172,12 +13208,14 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     // LOTW only filter
     if ( ui->cb_f_LOTW->isChecked() && !m_config.lotw_users ().user (dxCall)) {
         if (m_zdebug) log("callsignFiltered: User not in LOTW");
+        monitor_skip ("not in the LoTW user list");
         return true;
     }
 
     // Ignored stations filter
     if (m_ignoredStationsCache.contains(dxCall)) {
         if (m_zdebug) log("callsignFiltered: Station is in the ignore list");
+        monitor_skip ("station is in the ignore list");
         return true;
     }
 
@@ -13186,6 +13224,7 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     QString dbM = dt.report();
     if (ui->sbMindB->value() > -30 && dbM.toInt() < ui->sbMindB->value()) {
         if (m_zdebug) log("callsignFiltered: Station signal strength under threshold: " + dbM);
+        monitor_skip (QString {"signal %1 dB is below the %2 dB threshold"}.arg (dbM, QString::number (ui->sbMindB->value ())));
         return true;
     }
 
@@ -13193,17 +13232,20 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     auto const& looked_up = m_logBook.countries ()->lookup (dxCall);
     QString continent = AD1CCty::continent (looked_up.continent);
     if (m_zdebug) log("callsignFiltered: Continent filtering...");
-    if (continent == "EU" && !ui->cb_c_EU->isChecked()) return true;
-    else if (continent == "AF" && !ui->cb_c_AF->isChecked()) return true;
-    else if (continent == "AN" && !ui->cb_c_AN->isChecked()) return true;
-    else if (continent == "AS" && !ui->cb_c_AS->isChecked()) return true;
-    else if (continent == "NA" && !ui->cb_c_NA->isChecked()) return true;
-    else if (continent == "SA" && !ui->cb_c_SA->isChecked()) return true;
-    else if (continent == "OC" && !ui->cb_c_OC->isChecked()) return true;
+    if (continent == "EU" && !ui->cb_c_EU->isChecked()) { monitor_skip ("Europe is disabled by the continent filter"); return true; }
+    else if (continent == "AF" && !ui->cb_c_AF->isChecked()) { monitor_skip ("Africa is disabled by the continent filter"); return true; }
+    else if (continent == "AN" && !ui->cb_c_AN->isChecked()) { monitor_skip ("Antarctica is disabled by the continent filter"); return true; }
+    else if (continent == "AS" && !ui->cb_c_AS->isChecked()) { monitor_skip ("Asia is disabled by the continent filter"); return true; }
+    else if (continent == "NA" && !ui->cb_c_NA->isChecked()) { monitor_skip ("North America is disabled by the continent filter"); return true; }
+    else if (continent == "SA" && !ui->cb_c_SA->isChecked()) { monitor_skip ("South America is disabled by the continent filter"); return true; }
+    else if (continent == "OC" && !ui->cb_c_OC->isChecked()) { monitor_skip ("Oceania is disabled by the continent filter"); return true; }
 
     if (m_zdebug) log("callsignFiltered: CQ Target filtering...");
 
-    if (!message_words[2].startsWith("CQ") && ui->cb_ignoreCQTarget->currentIndex() == 3) return true;
+    if (!message_words[2].startsWith("CQ") && ui->cb_ignoreCQTarget->currentIndex() == 3) {
+        monitor_skip ("not a directed CQ while CQ-target-only filtering is enabled");
+        return true;
+    }
 
     if( message_words.size() > 3 && ( ui->cb_ignoreCQTarget->currentIndex() > 0 || ui->cb_filter_CQDX_Continent->currentIndex() > 0) && message_words[2].startsWith("CQ")) {
         QString w0 = message_words[1];
@@ -13463,12 +13505,14 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
     if ( !is_CQ && !(ui->cbCQonlyIncl73->isChecked() && is_73) ) {
         if (m_zdebug) log("Not CQ/73. Exiting.");
+        monitor_skip ("message is not CQ or RR73");
         return false;
     }
 
 
     if (m_TxFirstLock && (ui->txFirstCheckBox->isChecked() != m_txFirst)) {
         if (m_zdebug) log("callsignFiltered: TX First Lock. Exiting.");
+        monitor_skip ("TX First lock does not match the candidate");
         return false;
     }
 
@@ -13533,6 +13577,20 @@ bool MainWindow::callsignFiltered(DecodedText dt)
         } // #FT2-PATCHED
         m_prioTxFirst=(nmod!=0);
         m_prioGrid  = dxGrid;
+        QString priority_reason;
+        if (forcePreferPromotion) {
+            priority_reason = QString {"matched a preferred CQ target (%1)"}.arg (CQTarget);
+        } else if (ui->cb_autoCallPriority->currentIndex() == 2) {
+            priority_reason = dxGrid.length() == 4
+                ? QString {"furthest station seen this cycle at %1"}.arg (dxGrid)
+                : QString {"distance priority is enabled and this decode has no usable grid"};
+        } else if (ui->cb_autoCallPriority->currentIndex() == 1) {
+            priority_reason = QString {"strongest signal this cycle at %1 dB"}.arg (dbM);
+        } else {
+            priority_reason = "first eligible candidate this cycle";
+        }
+        append_qso_monitor_log ("Candidate", QString {"Promoted %1: %2."}.arg (dxCall, priority_reason));
+        set_qso_monitor_decision ("Priority candidate selected", QString {"%1 was chosen because it was the %2."}.arg (dxCall, priority_reason));
     }
 
 
@@ -13593,6 +13651,8 @@ void MainWindow::on_actionCall_next_triggered() {
     message.deCallAndGrid (/*out*/ dxCall, dxGrid);
 
     m_nextCall = dxCall;
+    append_qso_monitor_log ("Pounce", QString {"Manual pounce set for %1."}.arg (dxCall));
+    set_qso_monitor_decision ("Manual pounce target", QString {"Operator selected %1 for the next available response."}.arg (dxCall));
 
     m_nextRpt = message.report();
     ui->rptSpinBox->setValue(m_nextRpt.toInt());
@@ -14256,6 +14316,10 @@ void MainWindow::toggleBands() {
 
   if (newBand.isEmpty() || row < 0) return;
 
+    append_qso_monitor_log ("Band Hopper", QString {"Switching from %1 to %2 based on the current schedule row."}
+                            .arg (currentBand, newBand));
+    set_qso_monitor_decision ("Band hop", QString {"Selected %1 from the active band-hopper schedule."}.arg (newBand));
+
     ui->bandComboBox->setCurrentText (newBand);
     m_wideGraph->setRxBand (newBand);
     m_lastBand = newBand;
@@ -14269,6 +14333,7 @@ void MainWindow::toggleBands() {
 void MainWindow::switchBand(int row) {
     if (row >= 0) {
         ui->stopTxButton->click ();
+        append_qso_monitor_log ("Band", QString {"Changed to %1."}.arg (ui->bandComboBox->itemText (row)));
         ui->bandComboBox->setCurrentIndex (row);
         on_bandComboBox_activated (row);
         m_priorityCall = QString();
@@ -14345,6 +14410,9 @@ void MainWindow::ZProcess ()
             && m_lastCall != m_priorityCall && (ui->dxCallEntry->text().isEmpty() || ui->dxCallEntry->text() == m_priorityCall)) {
         tx_watchdog(false);
         if (m_zdebug) log("Next call: " + m_priorityCall);
+        append_qso_monitor_log ("Auto Call", QString {"Answering %1 on %2 Hz."}
+                                .arg (m_priorityCall, QString::number (m_prioFreq)));
+        set_qso_monitor_decision ("Answering station", QString {"Selected %1 as the current priority call."}.arg (m_priorityCall));
         m_nextCall = m_priorityCall;
         m_nextGrid = m_prioGrid;
         dxLookup(m_nextCall, m_prioGrid);
@@ -14388,7 +14456,10 @@ void MainWindow::ZProcess ()
                                     ui->txFirstCheckBox->setChecked(txf);
                             }
                             if (m_zdebug) log("ZProcess: Switched to AutoCQ");
+                            append_qso_monitor_log ("Auto Switch", "Auto Call counter expired, switching to Auto CQ.");
+                            set_qso_monitor_decision ("Switched to Auto CQ", "Auto mode switch is enabled and the Auto Call counter reached zero.");
                         } else {
+                            append_qso_monitor_log ("Auto Call", "Counter expired. Evaluating band-hopper schedule.");
                             toggleBands();
                         }
                     }
@@ -14400,8 +14471,10 @@ void MainWindow::ZProcess ()
                                 setFreeFreq();
                                 auto_tx_mode(true);
                                 m_autoTXFreq=false;
+                                append_qso_monitor_log ("Auto CQ", "Found a free transmit slot and re-armed Auto CQ.");
                             } else {
                                 auto_tx_mode(false);
+                                append_qso_monitor_log ("Auto CQ", "Waiting for another decode cycle before choosing a free transmit slot.");
                             }
                         }
                         ui->le_autoCQLeft->setText(QString::number(l-1));
@@ -14416,7 +14489,10 @@ void MainWindow::ZProcess ()
                               // AutoCQ -> AutoCall boundary.
                               if (ui->cb_bandHopper->isChecked()) toggleBands();
                               if (m_zdebug) log("ZProcess: Switched to AutoCall");
+                              append_qso_monitor_log ("Auto Switch", "Auto CQ counter expired, switching to Auto Call.");
+                              set_qso_monitor_decision ("Switched to Auto Call", "Auto mode switch is enabled and the Auto CQ counter reached zero.");
                           } else {
+                              append_qso_monitor_log ("Auto CQ", "Counter expired. Evaluating band-hopper schedule.");
                               toggleBands();
                           }
                     }
@@ -14448,7 +14524,10 @@ void MainWindow::resetAutoSwitch() {
         ui->le_autoCQLeft->setText(QString::number(ui->sb_autoCQCount->value()));
         m_priorityCall = QString();
   m_priorityCallPreferCQTarget = false;
+  append_qso_monitor_log ("Automation", QString {"Counters reset. Auto CQ=%1, Auto Call=%2"}
+                          .arg (ui->le_autoCQLeft->text (), ui->le_autoCallLeft->text ()));
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 int MainWindow::watchdog() {
@@ -14567,6 +14646,173 @@ void MainWindow::on_actionPSKReporter_triggered() {
     }
 }
 
+void MainWindow::on_actionQSO_Monitor_triggered ()
+{
+    if (!ui->actionQSO_Monitor->isChecked()) {
+        if (m_qsoMonitorView) m_qsoMonitorView->hide ();
+        return;
+    }
+
+    if (!m_qsoMonitorView) {
+        m_qsoMonitorView.reset (new QSOMonitorWindow {});
+        m_qsoMonitorView->restoreGeometry (m_qsoMonitorViewGeometry);
+        connect (this, &MainWindow::finished, m_qsoMonitorView.data (), &QSOMonitorWindow::close);
+        connect (m_qsoMonitorView.data (), &QSOMonitorWindow::clear_log_requested, this, &MainWindow::clear_qso_monitor_log);
+        connect (m_qsoMonitorView.data (), &QSOMonitorWindow::window_visible_changed, this, [this] (bool visible) {
+            ui->actionQSO_Monitor->setChecked (visible);
+            if (!visible && m_qsoMonitorView) {
+                m_qsoMonitorViewGeometry = m_qsoMonitorView->saveGeometry ();
+            }
+            if (visible && m_qsoMonitorView) {
+                update_qso_monitor ();
+                m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
+            }
+        });
+    }
+
+    update_qso_monitor ();
+    m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
+    m_qsoMonitorView->setFont (m_config.decoded_text_font ());
+    m_qsoMonitorView->showNormal ();
+    m_qsoMonitorView->raise ();
+    m_qsoMonitorView->activateWindow ();
+}
+
+QString MainWindow::qso_progress_text () const
+{
+    switch (m_QSOProgress) {
+    case CALLING: return tr ("Calling / Idle");
+    case REPLYING: return tr ("Replying");
+    case REPORT: return tr ("Sending Report");
+    case ROGER_REPORT: return tr ("Sending RRR / RR73");
+    case ROGERS: return tr ("Sending 73");
+    case SIGNOFF: return tr ("Signoff");
+    default: return tr ("Unknown");
+    }
+}
+
+void MainWindow::update_qso_monitor_station_cache (QString const& call, QString const& grid)
+{
+    if (m_qsoMonitorStation.call == call && m_qsoMonitorStation.grid == grid) return;
+
+    m_qsoMonitorStation = {};
+    m_qsoMonitorStation.call = call;
+    m_qsoMonitorStation.grid = grid;
+
+    if (call.isEmpty ()) return;
+
+    auto const& looked_up = m_logBook.countries ()->lookup (call);
+    QString continent = AD1CCty::continent (looked_up.continent);
+    continent.replace ("AF", "Africa");
+    continent.replace ("AN", "Antarctica");
+    continent.replace ("AS", "Asia");
+    continent.replace ("EU", "Europe");
+    continent.replace ("NA", "N. America");
+    continent.replace ("OC", "Oceania");
+    continent.replace ("SA", "S. America");
+    continent.replace ("UN", "N/A");
+
+    m_qsoMonitorStation.country = looked_up.entity_name;
+    m_qsoMonitorStation.continent = continent;
+    m_qsoMonitorStation.cq_zone = QString::number (looked_up.CQ_zone);
+    m_qsoMonitorStation.itu_zone = QString::number (looked_up.ITU_zone);
+
+    if (looked_up.entity_name == "United States") {
+        m_qsoMonitorStation.state = stateLookup (call);
+    }
+
+    if (grid.length () >= 4) {
+        qint64 nsec = (QDateTime::currentMSecsSinceEpoch () / 1000) % 86400;
+        double utch = nsec / 3600.0;
+        int nAz;
+        int nEl;
+        int nDmiles;
+        int nDkm;
+        int nHotAz;
+        int nHotABetter;
+        azdist_ (const_cast<char *> ((m_config.my_grid () + "      ").left (6).toLatin1 ().constData ()),
+                 const_cast<char *> ((grid + "      ").left (6).toLatin1 ().constData ()), &utch,
+                 &nAz, &nEl, &nDmiles, &nDkm, &nHotAz, &nHotABetter, 6, 6);
+        int nd = m_config.miles () ? nDmiles : nDkm;
+        m_qsoMonitorStation.distance = QString::number (nd) + (m_config.miles () ? " mi" : " km");
+        m_qsoMonitorStation.bearing = QString::number (nAz);
+    }
+}
+
+void MainWindow::update_qso_monitor ()
+{
+    QString call = ui->dxCallEntry->text ().trimmed ();
+    QString grid = ui->dxGridEntry->text ().trimmed ();
+
+    if (call.isEmpty ()) call = m_hisCall.trimmed ();
+    if (grid.isEmpty ()) grid = m_hisGrid.trimmed ();
+
+    update_qso_monitor_station_cache (call, grid);
+
+    QString auto_cq = ui->cbAutoCQ->isChecked ()
+        ? tr ("On (%1 left of %2)").arg (ui->le_autoCQLeft->text (), QString::number (ui->sb_autoCQCount->value ()))
+        : tr ("Off");
+    QString auto_call = ui->cbAutoCall->isChecked ()
+        ? tr ("On (%1 left of %2)").arg (ui->le_autoCallLeft->text (), QString::number (ui->sb_autoCallCount->value ()))
+        : tr ("Off");
+    if (ui->cb_autoCallNext->isChecked ()) {
+        auto_call += tr (" | Pounce armed");
+    }
+
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->set_station_info (qso_progress_text ()
+                                            , m_qsoMonitorStation.call
+                                            , m_qsoMonitorStation.grid
+                                            , m_qsoMonitorStation.distance
+                                            , m_qsoMonitorStation.bearing
+                                            , m_qsoMonitorStation.country
+                                            , m_qsoMonitorStation.continent
+                                            , m_qsoMonitorStation.cq_zone
+                                            , m_qsoMonitorStation.itu_zone
+                                            , m_qsoMonitorStation.state);
+        m_qsoMonitorView->set_auto_info (auto_cq
+                                         , auto_call
+                                         , m_priorityCall
+                                         , m_qsoMonitorLastAction
+                                         , m_qsoMonitorLastReason);
+    }
+}
+
+void MainWindow::append_qso_monitor_log (QString const& category, QString const& detail)
+{
+    if (detail.isEmpty ()) return;
+
+    auto const entry = QString {"[%1] %2: %3"}
+        .arg (QDateTime::currentDateTime ().toString ("hh:mm:ss"), category, detail);
+    if (entry == m_qsoMonitorLastEntry) return;
+
+    m_qsoMonitorLastEntry = entry;
+    m_qsoMonitorEntries.append (entry);
+    while (m_qsoMonitorEntries.size () > 250) {
+        m_qsoMonitorEntries.removeFirst ();
+    }
+
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->append_decision_log (entry);
+    }
+}
+
+void MainWindow::set_qso_monitor_decision (QString const& action, QString const& reason)
+{
+    m_qsoMonitorLastAction = action;
+    m_qsoMonitorLastReason = reason;
+    update_qso_monitor ();
+}
+
+void MainWindow::clear_qso_monitor_log ()
+{
+    m_qsoMonitorEntries.clear ();
+    m_qsoMonitorLastEntry.clear ();
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
+    }
+}
+
 void MainWindow::updateQsoCounter(bool increment) {
     if (increment) {
         qso_total++;
@@ -14676,6 +14922,10 @@ bool MainWindow::setFreeFreq() {
 
     if(newTxFreq != 0) {
         if (m_zdebug) log("Free: " + QString::number(newTxFreq));
+        append_qso_monitor_log ("Auto CQ", QString {"Moved transmit frequency to %1 Hz after checking busy slots."}
+                                .arg (QString::number (newTxFreq)));
+        set_qso_monitor_decision ("Transmit slot updated", QString {"Selected %1 Hz because it was clear in the recent decode windows."}
+                                  .arg (QString::number (newTxFreq)));
         ui->TxFreqSpinBox->setValue(newTxFreq);
         on_TxFreqSpinBox_valueChanged (ui->TxFreqSpinBox->value ());
         return true;
@@ -14718,5 +14968,3 @@ void MainWindow::execCmd(QString cmd) {
     cmd.remove(0, cmd.indexOf(" ")+1);
     QProcess::startDetached(program, QStringList() << cmd);
 }
-
-
