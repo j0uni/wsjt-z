@@ -36,6 +36,10 @@ Pre-built Windows installers and release notes are published on the GitHub **Rel
 
   → **https://github.com/sq9fve/wsjt-z/releases**
 
+## Building from source (Linux)
+
+See **[BUILD.md](BUILD.md)** for dependencies, CMake options, standard and no-`sudo` builds, and troubleshooting.
+
 ## Features
 
 ### Operating workflow
