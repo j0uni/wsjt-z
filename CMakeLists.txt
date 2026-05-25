@@ -1583,6 +1583,19 @@ if (WSJT_CREATE_WINMAIN)
   set_target_properties (wsjtx PROPERTIES WIN32_EXECUTABLE ON)
 endif (WSJT_CREATE_WINMAIN)
 
+# jt9 opens ALLCALL7.TXT from its working directory (same folder as wsjtx/jt9).
+# install() handles release layouts; this keeps in-tree "cmake --build" runs working.
+foreach (_runtime_data_target IN ITEMS wsjtx jt9)
+  if (TARGET ${_runtime_data_target})
+    add_custom_command (TARGET ${_runtime_data_target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/ALLCALL7.TXT"
+        "$<TARGET_FILE_DIR:${_runtime_data_target}>/ALLCALL7.TXT"
+      COMMENT "Copy ALLCALL7.TXT next to ${_runtime_data_target} for decoder"
+      )
+  endif ()
+endforeach ()
+
 set_target_properties (wsjtx PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Darwin/Info.plist.in"
   MACOSX_BUNDLE_INFO_STRING "${PROJECT_DESCRIPTION}"

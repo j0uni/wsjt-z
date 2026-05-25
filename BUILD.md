@@ -74,6 +74,8 @@ cmake --build . -j"$(nproc)"
 
 The main binary is `build/wsjtx`.
 
+**Important:** the `jt9` decoder reads `ALLCALL7.TXT` from the same directory as `wsjtx` (the FT8 callsign hash database). A normal `cmake --build` copies this file next to the binaries automatically. If you see no decodes in the Band Activity window but signals on the waterfall, check `build/ALLCALL7.TXT` exists and restart WSJT-Z after rebuilding.
+
 Build decoder helpers as well:
 
 ```bash
@@ -228,11 +230,63 @@ make && make install-strip
 
 Then add `-DCMAKE_PREFIX_PATH="$HOME/hamlib-prefix"` to the `cmake` invocation.
 
+## Runtime files next to the binaries
+
+When you run `build/wsjtx` without `cmake --install`, the decoder subprocess (`build/jt9`) uses the **executable directory** as its working directory. These files must live there:
+
+| File | Purpose |
+|------|---------|
+| `jt9`, `wsprd`, … | Decoder engines spawned by the GUI |
+| `ALLCALL7.TXT` | FT8/FT4 callsign hash database (`lib/ft8var/cwfilter.f90`) |
+
+`cmake --build` copies `ALLCALL7.TXT` automatically (see `CMakeLists.txt` `POST_BUILD` on `wsjtx` and `jt9`). A plain `install` also places it in the install `bin/`.
+
+## Logs (decode / rig issues)
+
+Linux default locations (application name remains `WSJT-X`):
+
+| File | Contents |
+|------|----------|
+| `~/.local/share/WSJT-X/wsjtx_syslog.log` | Boost/Qt log: startup, shared memory, rig control |
+| `~/.local/share/WSJT-X/ALL.TXT` | Per-session Rx/Tx trace; **decoder stdout** (including `ALLCALL7.TXT` errors) |
+| `~/.local/share/WSJT-X/wsjtx.log` | ADIF-style QSO log |
+
+To watch decode activity while testing:
+
+```bash
+tail -f ~/.local/share/WSJT-X/ALL.TXT
+```
+
 ## Troubleshooting
 
 ### `Could not find Qt5`
 
 Install Qt 5 development packages (see above) or set `CMAKE_PREFIX_PATH` to a Qt 5 prefix (local sysroot or `~/Qt/5.x.x/gcc_64` from the Qt online installer — **Qt 6 is not supported** by this codebase).
+
+### No decodes in the log (waterfall shows signals)
+
+Symptoms: signals on the waterfall, empty Band Activity / decode list, possibly only your own CQ in `ALL.TXT` after a few minutes.
+
+1. Confirm `jt9` is running: `pgrep -a jt9` (path should be your `build/jt9`).
+2. Check `~/.local/share/WSJT-X/ALL.TXT` for:
+
+   ```text
+   ALLCALL7.TXT not found in working directory
+   ```
+
+   The GUI may truncate this to something like `L7.TXT not founn working directory`.
+
+3. Ensure the database is beside the binaries:
+
+   ```bash
+   ls -la build/ALLCALL7.TXT
+   # if missing:
+   cp ALLCALL7.TXT build/
+   ```
+
+4. **Restart** WSJT-Z completely. The running `jt9` process only reads `ALLCALL7.TXT` when it starts; copying the file while the app is open is not enough.
+
+After a normal `cmake --build`, the file should already be in `build/`. If decodes still fail, verify `jt9`’s working directory matches the binary folder: `readlink /proc/$(pgrep -n jt9)/cwd`.
 
 ### `cannot find -ludev`
 
