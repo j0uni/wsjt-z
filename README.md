@@ -20,6 +20,14 @@ WSJT-Z is a fork of [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) by **Joe Ta
 
 WSJT-Z supports **FT8**, **FT4**, **FT2**, **JT4 / JT9 / JT65**, **Q65**, **MSK144**, **WSPR**, **Echo** and **FreqCal**.
 
+## New In This WSJT-Z Build
+
+This branch includes additional WSJT-Z workflow features on top of the base project, including:
+
+- **FT8 Auto Bot** — bot-owned FT8/FT4 Search & Pounce or CQ operation with score-based target selection, worked-memory tracking, cooldown after failed QSOs, idle back-off, stuck/QRM detection, and waterfall-based TX slot planning
+- **QSO Monitor window** — a dedicated window for following automation decisions, current target, auto modes, and station context while operating
+- **FT8 Auto Bot window** — a dedicated control/monitor panel with live state, counters, target details, planned TX frequency, worked/cooldown memory, and a rolling decision log
+
 > ⚠️ **Always monitor your transceiver while using WSJT-Z**, unless unattended/automated operation is explicitly permitted by the regulations in your country.
 
 ---
