@@ -62,6 +62,7 @@ FT8AutoBotSettings normalizedSettings(FT8AutoBotSettings settings)
   settings.cqIdleAfter = qBound(1, settings.cqIdleAfter, 50);
   settings.cooldownMinutes = qBound(1, settings.cooldownMinutes, 24 * 60);
   settings.stuckCycleLimit = qBound(1, settings.stuckCycleLimit, 10);
+  settings.studyAfterCycles = qBound(1, settings.studyAfterCycles, 100);
   settings.idleTxPlanMinHz = qBound(200, settings.idleTxPlanMinHz, 4000);
   settings.idleTxPlanMaxHz = qBound(settings.idleTxPlanMinHz, settings.idleTxPlanMaxHz, 4000);
   settings.idleTxPlanStepHz = qBound(10, settings.idleTxPlanStepHz, 200);
@@ -101,6 +102,7 @@ void FT8AutoBot::setEnabled(bool enabled)
     }
     hasActiveQso_ = false;
     activeQso_ = ActiveQso {};
+    spCyclesSinceStudy_ = 0;
     state_ = FT8AutoBotState::Disabled;
     clearCycleCandidates();
     snapshot_.state = state_;
@@ -137,6 +139,7 @@ void FT8AutoBot::setMode(FT8AutoBotMode mode)
   if (state_ == FT8AutoBotState::Disabled) return;
   if (state_ == FT8AutoBotState::Paused) return;
   if (state_ == FT8AutoBotState::Idle) return;
+  if (state_ == FT8AutoBotState::Study) return;
   if (hasActiveQso_) return;
   state_ = mode_ == FT8AutoBotMode::SearchAndPounce
     ? FT8AutoBotState::Hunting
@@ -162,6 +165,14 @@ FT8AutoBotSnapshot FT8AutoBot::snapshot() const
 void FT8AutoBot::onDecode(DecodedText const& decoded)
 {
   if (!enabled() || !isCurrentModeSupported()) return;
+  if ((state_ == FT8AutoBotState::InQSO || state_ == FT8AutoBotState::AdoptingQSO)
+      && hasActiveQso_
+      && activeQsoShowsOtherPartner(decoded)) {
+    log(QStringLiteral("QRM"), QStringLiteral("call=%1 msg=%2")
+        .arg(activeQso_.call, decoded.string().trimmed()));
+    abandonActiveQso(QStringLiteral("qrm"), QDateTime::currentDateTimeUtc());
+    return;
+  }
   if (state_ == FT8AutoBotState::Paused) return;
   if (state_ == FT8AutoBotState::Disabled || state_ == FT8AutoBotState::InQSO) return;
   if (state_ == FT8AutoBotState::Abandoning) return;
@@ -173,16 +184,18 @@ void FT8AutoBot::onDecode(DecodedText const& decoded)
   }
 
   auto const candidate = buildCandidate(decoded);
-  if (candidate.call.isEmpty()) return;
+  if (candidate.call.isEmpty()) {
+    log(QStringLiteral("RX"), QStringLiteral("no_callsign msg=%1")
+        .arg(decoded.string().trimmed()));
+    return;
+  }
 
   if (mode_ == FT8AutoBotMode::SearchAndPounce) {
     if (!candidate.isCqLike) {
-      log(QStringLiteral("FILTER"), QStringLiteral("skipped=%1 reason=not_cq_like").arg(candidate.call));
       return;
     }
   } else {
     if (!candidate.isReplyToMe && !host_->tailenderCandidate(decoded)) {
-      log(QStringLiteral("FILTER"), QStringLiteral("skipped=%1 reason=not_reply_to_me_or_tailender").arg(candidate.call));
       return;
     }
   }
@@ -198,7 +211,8 @@ void FT8AutoBot::onDecode(DecodedText const& decoded)
 
   cycleCandidates_.append(candidate);
   counters_.candidatesThisCycle = cycleCandidates_.size();
-  log(QStringLiteral("SCORE"), QStringLiteral("candidate %1").arg(scoreDetail(candidate)));
+  log(QStringLiteral("SCORE"), QStringLiteral("candidate %1")
+      .arg(scoreDetail(candidate, candidate.decodedAtUtc)));
 
   if (state_ == FT8AutoBotState::AdoptingQSO && hasActiveQso_ && candidate.call == activeQso_.call) {
     activeQso_.inAdoptionGrace = false;
@@ -226,6 +240,11 @@ void FT8AutoBot::onPeriodBoundary(QDateTime const& nowUtc)
   }
 
   ++cycleIndex_;
+  bool const studyThresholdReached = mode_ == FT8AutoBotMode::SearchAndPounce
+    && state_ != FT8AutoBotState::Study
+    && state_ != FT8AutoBotState::Disabled
+    && state_ != FT8AutoBotState::Paused
+    && ++spCyclesSinceStudy_ >= settings_.studyAfterCycles;
   auto const purged = memory_.purgeExpiredCooldowns(nowUtc);
   if (purged > 0) {
     log(QStringLiteral("COOLDOWN"), QStringLiteral("purged=%1").arg(QString::number(purged)));
@@ -252,6 +271,32 @@ void FT8AutoBot::onPeriodBoundary(QDateTime const& nowUtc)
     if (activeQso_.sameStateCycles > settings_.stuckCycleLimit) {
       abandonActiveQso(QStringLiteral("stuck"), nowUtc);
     }
+  }
+
+  if (studyThresholdReached
+      && !hasActiveQso_
+      && (state_ == FT8AutoBotState::Hunting || state_ == FT8AutoBotState::Idle)
+      && !host_->transmitting()) {
+    enterStudy();
+    clearCycleCandidates();
+    return;
+  }
+
+  if (state_ == FT8AutoBotState::Study) {
+    planIdleTxFrequency();
+    if (snapshot_.studyCyclesRemaining > 0) {
+      --snapshot_.studyCyclesRemaining;
+      log(QStringLiteral("STUDY"), QStringLiteral("remaining_cycles=%1 planned_tx=%2")
+          .arg(QString::number(snapshot_.studyCyclesRemaining),
+               QString::number(snapshot_.plannedTxFreq)));
+    }
+    if (snapshot_.studyCyclesRemaining <= 0) {
+      state_ = FT8AutoBotState::Hunting;
+      snapshot_.state = state_;
+      log(QStringLiteral("STUDY"), QStringLiteral("exit state=Hunting"));
+    }
+    clearCycleCandidates();
+    return;
   }
 
   if (state_ == FT8AutoBotState::Idle) {
@@ -298,11 +343,37 @@ void FT8AutoBot::onQsoProgress(int qsoProgress)
 {
   if (!hasActiveQso_) return;
   if (qsoProgress == activeQso_.lastProgress) return;
+
+  if (qsoProgress == qsoProgressCallingValue()
+      && activeQso_.maxProgressSeen >= 4) {
+    log(QStringLiteral("STATE"), QStringLiteral("progress_reset call=%1 from=%2 to=%3 action=release")
+        .arg(activeQso_.call,
+             QString::number(activeQso_.lastProgress),
+             QString::number(qsoProgress)));
+    setLastDecision(QStringLiteral("Released QSO"),
+                    QStringLiteral("WSJT-X reset QSO progress after late-stage exchange"),
+                    QStringLiteral("max_progress=%1").arg(QString::number(activeQso_.maxProgressSeen)));
+    host_->botEnableAutoTx(false);
+    hasActiveQso_ = false;
+    activeQso_ = ActiveQso {};
+    snapshot_.targetCall.clear();
+    snapshot_.targetGrid.clear();
+    snapshot_.targetCountry.clear();
+    snapshot_.targetDistanceKm = 0;
+    counters_.activeQsoCycles = 0;
+    state_ = mode_ == FT8AutoBotMode::SearchAndPounce
+      ? FT8AutoBotState::Hunting
+      : FT8AutoBotState::CallingCQ;
+    snapshot_.state = state_;
+    return;
+  }
+
   log(QStringLiteral("STATE"), QStringLiteral("progress call=%1 from=%2 to=%3")
       .arg(activeQso_.call,
            QString::number(activeQso_.lastProgress),
            QString::number(qsoProgress)));
   activeQso_.lastProgress = qsoProgress;
+  activeQso_.maxProgressSeen = qMax(activeQso_.maxProgressSeen, qsoProgress);
   activeQso_.sameStateCycles = 0;
   if (state_ == FT8AutoBotState::AdoptingQSO) {
     activeQso_.inAdoptionGrace = false;
@@ -318,6 +389,7 @@ void FT8AutoBot::onQsoLogged(QString const& call, QString const&, QString const&
   host_->botClearDx();
   hasActiveQso_ = false;
   activeQso_ = ActiveQso {};
+  spCyclesSinceStudy_ = 0;
   snapshot_.cqWithoutCallerCount = 0;
   snapshot_.targetCall.clear();
   snapshot_.targetGrid.clear();
@@ -338,17 +410,22 @@ void FT8AutoBot::syncLoggedQso(QString const& call, QString const&, QString cons
 
   if (botOwned) {
     ++counters_.qsosCompleted;
-    if (!country.isEmpty() && !sessionDxccWorked_.contains(country)) {
+    if (activeQso_.wasNewDx && !country.isEmpty() && !sessionDxccWorked_.contains(country)) {
       sessionDxccWorked_.insert(country);
       ++counters_.newDxcc;
     }
     setLastDecision(QStringLiteral("QSO complete"),
                     QStringLiteral("Logged %1").arg(normalizedBase(call)),
-                    QStringLiteral("worked_count=%1").arg(QString::number(memory_.workedCount())));
+                    QStringLiteral("country=%1 new_dx=%2 worked_count=%3")
+                    .arg(country,
+                         activeQso_.wasNewDx ? QStringLiteral("yes") : QStringLiteral("no"),
+                         QString::number(memory_.workedCount())));
   }
 
-  log(QStringLiteral("QSO_OK"), QStringLiteral("call=%1 worked_count=%2 source=%3")
+  log(QStringLiteral("QSO_OK"), QStringLiteral("call=%1 country=%2 new_dx=%3 worked_count=%4 source=%5")
       .arg(normalizedBase(call),
+           country,
+           (botOwned && activeQso_.wasNewDx) ? QStringLiteral("yes") : QStringLiteral("no"),
            QString::number(memory_.workedCount()),
            botOwned ? QStringLiteral("bot") : QStringLiteral("external")));
 }
@@ -436,7 +513,7 @@ bool FT8AutoBot::isReplyToMe(DecodedText const& decoded) const
   return containsDirectedCall(decoded.string(), host_->myCall());
 }
 
-bool FT8AutoBot::isCqLike(DecodedText const& decoded) const
+bool FT8AutoBot::isCqLike(DecodedText const& decoded, QString const& candidateCall) const
 {
   auto const message = decoded.string().trimmed().toUpper();
   if (settings_.acceptRr73AsCq
@@ -447,13 +524,46 @@ bool FT8AutoBot::isCqLike(DecodedText const& decoded) const
     return true;
   }
 
-  auto const words = decoded.messageWords();
-  if (words.size() < 3) return false;
+  auto const call = candidateCall.trimmed().toUpper();
+  if (call.isEmpty()) return false;
 
-  QString call;
-  QString grid;
-  decoded.deCallAndGrid(call, grid);
-  return message.contains(QStringLiteral("CQ "));
+  auto const escapedCall = QRegularExpression::escape(call);
+  auto const directCqPattern = QRegularExpression {
+    QStringLiteral("(^|\\s)CQ\\s+%1(\\s+[A-R]{2}[0-9]{2}([A-X]{2})?)?(\\s|$)")
+      .arg(escapedCall),
+    QRegularExpression::CaseInsensitiveOption
+  };
+  return directCqPattern.match(message).hasMatch();
+}
+
+bool FT8AutoBot::activeQsoShowsOtherPartner(DecodedText const& decoded) const
+{
+  if (!hasActiveQso_) return false;
+
+  auto const text = decoded.string().trimmed().toUpper();
+  if (text.contains(QStringLiteral(" CQ ")) || text.startsWith(QStringLiteral("CQ "))) return false;
+  if (containsDirectedCall(text, host_->myCall())) return false;
+
+  auto const target = normalizedBase(activeQso_.call);
+  auto const myBase = normalizedBase(host_->myCall());
+  if (target.isEmpty()) return false;
+
+  QStringList callWords;
+  for (auto const& word : decoded.messageWords()) {
+    auto const upper = word.trimmed().toUpper();
+    if (!looksLikeCallWord(upper)) continue;
+    callWords.append(normalizedBase(upper));
+  }
+
+  callWords.removeAll(QString {});
+  callWords.removeDuplicates();
+  if (!callWords.contains(target)) return false;
+
+  for (auto const& call : callWords) {
+    if (call == target || call == myBase) continue;
+    return true;
+  }
+  return false;
 }
 
 bool FT8AutoBot::decodeTxFirst(DecodedText const& decoded) const
@@ -488,6 +598,8 @@ int FT8AutoBot::distanceScore(QString const& grid) const
 FT8AutoBot::Candidate FT8AutoBot::buildCandidate(DecodedText const& decoded)
 {
   Candidate candidate;
+  candidate.decodedAtUtc = QDateTime::currentDateTimeUtc();
+  candidate.seenCycleIndex = cycleIndex_;
   decoded.deCallAndGrid(candidate.call, candidate.grid);
   candidate.call = candidate.call.trimmed().toUpper();
   candidate.grid = candidate.grid.trimmed().toUpper();
@@ -528,12 +640,13 @@ FT8AutoBot::Candidate FT8AutoBot::buildCandidate(DecodedText const& decoded)
   candidate.rxFreq = decoded.frequencyOffset();
   candidate.reportDb = decoded.report().toInt();
   candidate.txFirst = decodeTxFirst(decoded);
-  candidate.isCqLike = isCqLike(decoded);
+  candidate.isCqLike = isCqLike(decoded, candidate.call);
   candidate.isReplyToMe = isReplyToMe(decoded);
 
   candidate.scoreNewCall = 1000;
-  if (!candidate.country.isEmpty()
-      && !host_->countryWorked(candidate.country, host_->mode(), host_->band())) {
+  candidate.isNewDx = !candidate.country.isEmpty()
+      && !host_->countryWorked(candidate.country, host_->mode(), host_->band());
+  if (candidate.isNewDx) {
     candidate.scoreNewDx = 500;
   }
   candidate.scoreDistance = distanceScore(candidate.grid);
@@ -541,32 +654,67 @@ FT8AutoBot::Candidate FT8AutoBot::buildCandidate(DecodedText const& decoded)
   return candidate;
 }
 
+bool FT8AutoBot::candidateIsFresh(Candidate const& candidate, QDateTime const& nowUtc) const
+{
+  if (!candidate.decodedAtUtc.isValid()) return false;
+  auto const trPeriod = qMax(1, host_->trPeriodSeconds());
+  auto const maxAgeSeconds = 4 * trPeriod;
+  return candidate.decodedAtUtc.secsTo(nowUtc) < maxAgeSeconds;
+}
+
+int FT8AutoBot::candidateAgeSeconds(Candidate const& candidate, QDateTime const& nowUtc) const
+{
+  if (!candidate.decodedAtUtc.isValid()) return std::numeric_limits<int>::max();
+  return qMax(0, static_cast<int>(candidate.decodedAtUtc.secsTo(nowUtc)));
+}
+
+int FT8AutoBot::candidateAgeScore(Candidate const& candidate, QDateTime const& nowUtc) const
+{
+  auto const trPeriod = qMax(1, host_->trPeriodSeconds());
+  auto const maxAgeSeconds = 4 * trPeriod;
+  auto const ageSeconds = candidateAgeSeconds(candidate, nowUtc);
+  if (ageSeconds >= maxAgeSeconds) return 0;
+  return qMax(0, ((maxAgeSeconds - ageSeconds) * 40) / maxAgeSeconds);
+}
+
 void FT8AutoBot::evaluateCandidates(QDateTime const& nowUtc)
 {
   Candidate best;
   bool haveBest = false;
+  int bestEffectiveScore = std::numeric_limits<int>::min();
 
   for (auto const& candidate : cycleCandidates_) {
+    if (!candidateIsFresh(candidate, nowUtc)) {
+      log(QStringLiteral("FILTER"), QStringLiteral("skipped=%1 reason=stale age_sec=%2 seen_cycle=%3 current_cycle=%4")
+          .arg(candidate.call,
+               QString::number(candidate.decodedAtUtc.secsTo(nowUtc)),
+               QString::number(candidate.seenCycleIndex),
+               QString::number(cycleIndex_)));
+      continue;
+    }
+
+    auto const effectiveScore = candidate.totalScore + candidateAgeScore(candidate, nowUtc);
     if (!haveBest
-        || candidate.totalScore > best.totalScore
-        || (candidate.totalScore == best.totalScore && candidate.reportDb > best.reportDb)
-        || (candidate.totalScore == best.totalScore && candidate.reportDb == best.reportDb
+        || effectiveScore > bestEffectiveScore
+        || (effectiveScore == bestEffectiveScore && candidate.reportDb > best.reportDb)
+        || (effectiveScore == bestEffectiveScore && candidate.reportDb == best.reportDb
             && candidate.rxFreq < best.rxFreq)) {
       best = candidate;
+      bestEffectiveScore = effectiveScore;
       haveBest = true;
     }
   }
 
-  if (!haveBest || best.totalScore < settings_.minScore) {
+  if (!haveBest || bestEffectiveScore < settings_.minScore) {
     if (haveBest) {
       log(QStringLiteral("IDLE"), QStringLiteral("reason=below_threshold best_total=%1 min_score=%2 duration_sec=%3 %4")
-          .arg(QString::number(best.totalScore),
+          .arg(QString::number(bestEffectiveScore),
                QString::number(settings_.minScore),
                QString::number(settings_.idleListenSeconds),
-               scoreDetail(best)));
+               scoreDetail(best, nowUtc)));
       setLastDecision(QStringLiteral("Entered Idle"),
                       QStringLiteral("Best score below threshold"),
-                      scoreDetail(best));
+                      scoreDetail(best, nowUtc));
     } else {
       log(QStringLiteral("IDLE"), QStringLiteral("reason=no_candidates duration_sec=%1")
           .arg(QString::number(settings_.idleListenSeconds)));
@@ -578,17 +726,33 @@ void FT8AutoBot::evaluateCandidates(QDateTime const& nowUtc)
   }
 
   snapshot_.cqWithoutCallerCount = 0;
-  log(QStringLiteral("ARM"), QStringLiteral("selected %1").arg(scoreDetail(best)));
+  log(QStringLiteral("ARM"), QStringLiteral("selected %1").arg(scoreDetail(best, nowUtc)));
   setLastDecision(QStringLiteral("Selected target"),
                   QStringLiteral("Best eligible candidate"),
-                  scoreDetail(best));
+                  scoreDetail(best, nowUtc));
   armCandidate(best);
+}
+
+void FT8AutoBot::enterStudy()
+{
+  if (mode_ != FT8AutoBotMode::SearchAndPounce) return;
+  state_ = FT8AutoBotState::Study;
+  snapshot_.state = state_;
+  snapshot_.studyCyclesRemaining = 2;
+  spCyclesSinceStudy_ = 0;
+  host_->botEnableAutoTx(false);
+  planIdleTxFrequency();
+  log(QStringLiteral("STUDY"), QStringLiteral("enter remaining_cycles=%1")
+      .arg(QString::number(snapshot_.studyCyclesRemaining)));
+  setLastDecision(QStringLiteral("Study"),
+                  QStringLiteral("Paused S&P decisions to observe two decode cycles"));
 }
 
 void FT8AutoBot::enterIdle(QDateTime const& nowUtc, QString const& reason)
 {
   state_ = FT8AutoBotState::Idle;
   snapshot_.state = state_;
+  snapshot_.studyCyclesRemaining = 0;
   snapshot_.idleUntilUtc = nowUtc.addSecs(settings_.idleListenSeconds);
   snapshot_.idleRemainingSeconds = settings_.idleListenSeconds;
   host_->botEnableAutoTx(false);
@@ -610,6 +774,7 @@ void FT8AutoBot::resumeFromIdle()
   snapshot_.idleUntilUtc = QDateTime {};
   snapshot_.idleRemainingSeconds = 0;
   snapshot_.cqWithoutCallerCount = 0;
+  snapshot_.studyCyclesRemaining = 0;
   state_ = mode_ == FT8AutoBotMode::SearchAndPounce
     ? FT8AutoBotState::Hunting
     : FT8AutoBotState::CallingCQ;
@@ -659,9 +824,12 @@ int FT8AutoBot::pickBestTxFreq(bool txFirstSlot) const
   return bestFreq;
 }
 
-bool FT8AutoBot::ensurePlannedTxFreq()
+bool FT8AutoBot::ensurePlannedTxFreq(bool txFirstSlot)
 {
-  auto const txFirstSlot = host_->txFirst();
+  if (snapshot_.plannedTxFirst != txFirstSlot) {
+    log(QStringLiteral("TX_PLAN"), QStringLiteral("slot_switch previous=%1 new=%2")
+        .arg(slotText(snapshot_.plannedTxFirst), slotText(txFirstSlot)));
+  }
   auto const busy = host_->busyTxBins(settings_.idleTxPlanMinHz,
                                       settings_.idleTxPlanMaxHz,
                                       settings_.idleTxPlanStepHz,
@@ -704,11 +872,11 @@ void FT8AutoBot::armCandidate(Candidate const& candidate)
   snapshot_.state = state_;
   ++counters_.attempts;
 
-  if (!ensurePlannedTxFreq()) {
+  if (!ensurePlannedTxFreq(candidate.txFirst)) {
     log(QStringLiteral("ARM"), QStringLiteral("failed=tx_freq_unavailable call=%1").arg(candidate.call));
     setLastDecision(QStringLiteral("Arm failed"),
                     QStringLiteral("No clear TX frequency available"),
-                    scoreDetail(candidate));
+                    scoreDetail(candidate, QDateTime::currentDateTimeUtc()));
     enterIdle(QDateTime::currentDateTimeUtc(), QStringLiteral("arm_failed"));
     return;
   }
@@ -730,6 +898,8 @@ void FT8AutoBot::armCandidate(Candidate const& candidate)
   host_->botStartQso();
   host_->botEnableAutoTx(true);
   startActiveQso(candidate.call);
+  activeQso_.country = candidate.country;
+  activeQso_.wasNewDx = candidate.isNewDx;
 }
 
 void FT8AutoBot::startActiveQso(QString const& call)
@@ -737,7 +907,10 @@ void FT8AutoBot::startActiveQso(QString const& call)
   hasActiveQso_ = true;
   activeQso_ = ActiveQso {};
   activeQso_.call = normalizedBase(call);
+  activeQso_.country = snapshot_.targetCountry;
+  activeQso_.wasNewDx = false;
   activeQso_.lastProgress = host_->qsoProgress();
+  activeQso_.maxProgressSeen = activeQso_.lastProgress;
   state_ = FT8AutoBotState::InQSO;
   snapshot_.state = state_;
   counters_.activeQsoCycles = 0;
@@ -750,7 +923,10 @@ void FT8AutoBot::adoptExistingQso()
   hasActiveQso_ = true;
   activeQso_ = ActiveQso {};
   activeQso_.call = normalizedBase(host_->dxCall());
+  activeQso_.country = snapshot_.targetCountry;
+  activeQso_.wasNewDx = false;
   activeQso_.lastProgress = host_->qsoProgress();
+  activeQso_.maxProgressSeen = activeQso_.lastProgress;
   activeQso_.inAdoptionGrace = true;
   activeQso_.adoptionPeriodsRemaining = qMax(1, settings_.adoptionGracePeriods);
   snapshot_.targetCall = host_->dxCall().trimmed();
@@ -800,6 +976,7 @@ void FT8AutoBot::abandonActiveQso(QString const& reason, QDateTime const& nowUtc
   snapshot_.targetCountry.clear();
   snapshot_.targetDistanceKm = 0;
   counters_.activeQsoCycles = 0;
+  snapshot_.studyCyclesRemaining = 0;
   enterIdle(nowUtc, QStringLiteral("abandon_%1").arg(reason));
 }
 
@@ -825,6 +1002,7 @@ void FT8AutoBot::resumeFromPause()
   snapshot_.pauseReason.clear();
   snapshot_.idleUntilUtc = QDateTime {};
   snapshot_.idleRemainingSeconds = 0;
+  snapshot_.studyCyclesRemaining = 0;
   if (!host_->dxCall().trimmed().isEmpty() && host_->qsoProgress() != qsoProgressCallingValue()) {
     adoptExistingQso();
   } else {
@@ -848,14 +1026,19 @@ void FT8AutoBot::log(QString const& category, QString const& detail) const
   host_->botLog(category, detail);
 }
 
-QString FT8AutoBot::scoreDetail(Candidate const& candidate) const
+QString FT8AutoBot::scoreDetail(Candidate const& candidate, QDateTime const& nowUtc) const
 {
-  return QStringLiteral("call=%1 score=%2 new_call=%3 new_dx=%4 distance=%5 dist_km=%6 min=%7 rx=%8 report=%9")
+  auto const ageSeconds = candidateAgeSeconds(candidate, nowUtc);
+  auto const ageScore = candidateAgeScore(candidate, nowUtc);
+  return QStringLiteral("call=%1 country=%2 score=%3 new_call=%4 new_dx=%5 distance=%6 age_bonus=%7 old=%8 dist_km=%9 min=%10 rx=%11 report=%12")
     .arg(candidate.call,
-         QString::number(candidate.totalScore),
+         candidate.country,
+         QString::number(candidate.totalScore + ageScore),
          QString::number(candidate.scoreNewCall),
          QString::number(candidate.scoreNewDx),
          QString::number(candidate.scoreDistance),
+         QString::number(ageScore),
+         QString::number(ageSeconds),
          QString::number(candidate.scoreDistance * 50),
          QString::number(settings_.minScore),
          QString::number(candidate.rxFreq),

@@ -149,9 +149,18 @@ private Q_SLOTS:
     bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ VK6XYZ OF87"))});
     bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
 
-    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QVERIFY2(bot.state() == FT8AutoBotState::InQSO,
+             qPrintable(QStringLiteral("state=%1 armedCall=%2 armedTxFirst=%3 armedTxFreq=%4 logs=%5")
+                            .arg(QString::number(static_cast<int>(bot.state())),
+                                 host.armedCall,
+                                 host.armedTxFirst ? QStringLiteral("true") : QStringLiteral("false"),
+                                 QString::number(host.armedTxFreq),
+                                 host.logEntries.join(QStringLiteral(" | ")))));
     QCOMPARE(host.armedCall, QStringLiteral("VK6XYZ"));
     QVERIFY(host.armedTxFreq >= 1000);
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("country=Australia")) && entry.contains(QStringLiteral("new_dx=500"));
+    }));
   }
 
   void below_threshold_enters_idle_at_999_with_default_1000()
@@ -252,7 +261,13 @@ private Q_SLOTS:
     bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ VK6XYZ OF87"))});
     bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
 
-    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QVERIFY2(bot.state() == FT8AutoBotState::InQSO,
+             qPrintable(QStringLiteral("state=%1 armedCall=%2 armedTxFirst=%3 armedTxFreq=%4 logs=%5")
+                            .arg(QString::number(static_cast<int>(bot.state())),
+                                 host.armedCall,
+                                 host.armedTxFirst ? QStringLiteral("true") : QStringLiteral("false"),
+                                 QString::number(host.armedTxFreq),
+                                 host.logEntries.join(QStringLiteral(" | ")))));
     bot.onWatchdogTriggered();
 
     QCOMPARE(bot.state(), FT8AutoBotState::Idle);
@@ -276,7 +291,12 @@ private Q_SLOTS:
 
     bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ K2ABC -10"), 1500)});
     bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
-    QCOMPARE(host.armedCall, QStringLiteral("K2ABC"));
+    QVERIFY2(host.armedCall == QStringLiteral("K2ABC"),
+             qPrintable(QStringLiteral("armedCall=%1 armedTxFirst=%2 armedTxFreq=%3 logs=%4")
+                            .arg(host.armedCall,
+                                 host.armedTxFirst ? QStringLiteral("true") : QStringLiteral("false"),
+                                 QString::number(host.armedTxFreq),
+                                 host.logEntries.join(QStringLiteral(" | ")))));
   }
 
   void cq_tailender_candidate_is_accepted_via_host_rule()
@@ -401,7 +421,8 @@ private Q_SLOTS:
     bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
 
     QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
-    QCOMPARE(host.armedCall, QStringLiteral("K2ABC"));
+    QVERIFY2(host.armedCall == QStringLiteral("K2ABC"),
+             qPrintable(host.logEntries.join(QStringLiteral(" | "))));
   }
 
   void idle_wake_in_sp_mode_arms_high_scoring_cq()
@@ -420,6 +441,167 @@ private Q_SLOTS:
 
     QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
     QCOMPARE(host.armedCall, QStringLiteral("VK6XYZ"));
+  }
+
+  void sp_skips_directed_cq_with_text_between_cq_and_callsign()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("OH1ABC"), QStringLiteral("Finland"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ USA OH1ABC KP20"), 1500)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QVERIFY(host.armedCall.isEmpty());
+    QVERIFY(bot.state() != FT8AutoBotState::InQSO);
+  }
+
+  void stale_cq_reply_is_dropped_before_scoring()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("K2ABC"), QStringLiteral("United States"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setMode(FT8AutoBotMode::CQ);
+    bot.setEnabled(true);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ K2ABC -10"), 1500)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc().addSecs(61));
+
+    QVERIFY(host.armedCall.isEmpty());
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("reason=stale"));
+    }));
+  }
+
+  void raw_decode_without_callsign_is_logged_for_debugging()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("RR73"), 1500)});
+
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("RX:no_callsign msg="));
+    }));
+  }
+
+  void sp_enters_study_after_configured_cycles()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    auto settings = bot.settings();
+    settings.studyAfterCycles = 2;
+    bot.setSettings(settings);
+    bot.setEnabled(true);
+
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    QCOMPARE(bot.state(), FT8AutoBotState::Idle);
+
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    QCOMPARE(bot.state(), FT8AutoBotState::Study);
+    QCOMPARE(bot.snapshot().studyCyclesRemaining, 2);
+
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    QCOMPARE(bot.state(), FT8AutoBotState::Study);
+    QCOMPARE(bot.snapshot().studyCyclesRemaining, 1);
+
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    QCOMPARE(bot.state(), FT8AutoBotState::Hunting);
+  }
+
+  void sp_enters_study_before_next_pick_when_threshold_matures_during_qso()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("VK6XYZ"), QStringLiteral("Australia"));
+    host.countriesByCall.insert(QStringLiteral("K2ABC"), QStringLiteral("United States"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    auto settings = bot.settings();
+    settings.studyAfterCycles = 3;
+    bot.setSettings(settings);
+    bot.setEnabled(true);
+
+    auto const now = QDateTime::currentDateTimeUtc();
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ VK6XYZ OF87"))});
+    bot.onPeriodBoundary(now);
+
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(host.armedCall, QStringLiteral("VK6XYZ"));
+    QCOMPARE(host.startQsoCalls, 1);
+
+    bot.onPeriodBoundary(now.addSecs(15));
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+
+    bot.onQsoProgress(4);
+    bot.onQsoProgress(0);
+    QCOMPARE(bot.state(), FT8AutoBotState::Hunting);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ K2ABC FN31"))});
+    bot.onPeriodBoundary(now.addSecs(30));
+
+    QCOMPARE(bot.state(), FT8AutoBotState::Study);
+    QCOMPARE(bot.snapshot().studyCyclesRemaining, 2);
+    QCOMPARE(host.startQsoCalls, 1);
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("STUDY:enter"));
+    }));
+  }
+
+  void study_exit_rechecks_tx_plan_for_target_reply_slot()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.txFirstValue = false;
+    host.countriesByCall.insert(QStringLiteral("K2ABC"), QStringLiteral("United States"));
+    host.busyBinsBySlot.insert(false, QVector<int> {});
+    host.busyBinsBySlot.insert(true, QVector<int> {1700});
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    auto settings = bot.settings();
+    settings.studyAfterCycles = 2;
+    bot.setSettings(settings);
+    bot.setEnabled(true);
+
+    auto const now = QDateTime::currentDateTimeUtc();
+    bot.onPeriodBoundary(now);
+    QCOMPARE(bot.state(), FT8AutoBotState::Idle);
+
+    bot.onPeriodBoundary(now.addSecs(15));
+    QCOMPARE(bot.state(), FT8AutoBotState::Study);
+    auto const studyPlan = bot.snapshot().plannedTxFreq;
+    QCOMPARE(bot.snapshot().plannedTxFirst, false);
+
+    settings.studyAfterCycles = 99;
+    bot.setSettings(settings);
+
+    if (bot.state() == FT8AutoBotState::Study) bot.onPeriodBoundary(now.addSecs(30));
+    if (bot.state() == FT8AutoBotState::Study) bot.onPeriodBoundary(now.addSecs(45));
+    if (bot.state() == FT8AutoBotState::Study) bot.onPeriodBoundary(now.addSecs(60));
+    QVERIFY(bot.state() != FT8AutoBotState::Study);
+
+    auto oddSlotDecode = decodeLine(QStringLiteral("CQ K2ABC FN31"), 1500);
+    oddSlotDecode.replace(0, 6, QStringLiteral("230015"));
+    bot.onDecode(DecodedText {oddSlotDecode});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(host.armedCall, QStringLiteral("K2ABC"));
+    QVERIFY(host.armedTxFirst);
+    QVERIFY(!host.busyBinsBySlot.value(true).contains(host.armedTxFreq));
+    QVERIFY(host.armedTxFreq != studyPlan || studyPlan == 0);
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("TX_PLAN:slot_switch"));
+    }));
   }
 
   void detailed_logs_include_tx_plan_and_arm()
@@ -499,6 +681,54 @@ private Q_SLOTS:
     }));
   }
 
+  void active_target_working_other_station_triggers_qrm_cooldown()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.myCallValue = QStringLiteral("OH1ZZZ");
+    host.countriesByCall.insert(QStringLiteral("TC0HZR"), QStringLiteral("Turkey"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ TC0HZR KM38"), 1730)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(host.armedCall, QStringLiteral("TC0HZR"));
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("PD1HBL TC0HZR -13"), 1730)});
+
+    QCOMPARE(bot.state(), FT8AutoBotState::Idle);
+    QVERIFY(bot.memory().isOnCooldown(QStringLiteral("TC0HZR")));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("QRM:call=TC0HZR"));
+    }));
+  }
+
+  void late_stage_progress_reset_releases_qso_without_stuck_timeout()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("G3AKA"), QStringLiteral("England"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ G3AKA IO91"), 1500)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+
+    bot.onQsoProgress(1);
+    bot.onQsoProgress(4);
+    bot.onQsoProgress(0);
+
+    QCOMPARE(bot.state(), FT8AutoBotState::Hunting);
+    QVERIFY(!bot.memory().isOnCooldown(QStringLiteral("G3AKA")));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("progress_reset"));
+    }));
+  }
+
   void external_logged_qso_updates_worked_memory()
   {
     QTemporaryDir dir;
@@ -512,6 +742,24 @@ private Q_SLOTS:
     QVERIFY(bot.memory().isWorked(QStringLiteral("K1ABC")));
     QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
       return entry.contains(QStringLiteral("QSO_OK:call=K1ABC"));
+    }));
+  }
+
+  void bot_owned_qso_increments_new_dxcc_counter_when_candidate_was_new_dx()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("VK6XYZ"), QStringLiteral("Australia"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ VK6XYZ OF87"))});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    bot.onQsoLogged(QStringLiteral("VK6XYZ"), QStringLiteral("20m"), QStringLiteral("FT8"));
+
+    QCOMPARE(bot.counters().newDxcc, 1);
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("QSO_OK:call=VK6XYZ country=Australia new_dx=yes"));
     }));
   }
 

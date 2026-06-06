@@ -18,6 +18,7 @@ enum class FT8AutoBotState {
   Disabled,
   Paused,
   Hunting,
+  Study,
   CallingCQ,
   AdoptingQSO,
   Arming,
@@ -33,6 +34,7 @@ struct FT8AutoBotSettings
   int cqIdleAfter {10};
   int cooldownMinutes {30};
   int stuckCycleLimit {3};
+  int studyAfterCycles {12};
   bool acceptRr73AsCq {false};
   bool reuseMainWindowFilters {true};
   bool wakeDuringIdleInCQMode {true};
@@ -55,6 +57,7 @@ struct FT8AutoBotSnapshot
   int plannedTxFreq {0};
   bool plannedTxFirst {false};
   int cqWithoutCallerCount {0};
+  int studyCyclesRemaining {0};
   QDateTime idleUntilUtc;
   int idleRemainingSeconds {0};
   QString pauseReason;
@@ -156,11 +159,14 @@ private:
     QString call;
     QString grid;
     QString country;
+    QDateTime decodedAtUtc;
     int rxFreq {0};
     int reportDb {0};
     bool txFirst {false};
     bool isCqLike {false};
     bool isReplyToMe {false};
+    bool isNewDx {false};
+    int seenCycleIndex {0};
     int scoreNewCall {0};
     int scoreNewDx {0};
     int scoreDistance {0};
@@ -170,7 +176,10 @@ private:
   struct ActiveQso
   {
     QString call;
+    QString country;
+    bool wasNewDx {false};
     int lastProgress {0};
+    int maxProgressSeen {0};
     int sameStateCycles {0};
     bool inAdoptionGrace {false};
     int adoptionPeriodsRemaining {0};
@@ -178,16 +187,21 @@ private:
 
   bool isCurrentModeSupported() const;
   bool isReplyToMe(DecodedText const& decoded) const;
-  bool isCqLike(DecodedText const& decoded) const;
+  bool isCqLike(DecodedText const& decoded, QString const& candidateCall) const;
+  bool activeQsoShowsOtherPartner(DecodedText const& decoded) const;
   bool decodeTxFirst(DecodedText const& decoded) const;
   int distanceScore(QString const& grid) const;
   Candidate buildCandidate(DecodedText const& decoded);
   void evaluateCandidates(QDateTime const& nowUtc);
+  int candidateAgeSeconds(Candidate const& candidate, QDateTime const& nowUtc) const;
+  int candidateAgeScore(Candidate const& candidate, QDateTime const& nowUtc) const;
+  bool candidateIsFresh(Candidate const& candidate, QDateTime const& nowUtc) const;
+  void enterStudy();
   void enterIdle(QDateTime const& nowUtc, QString const& reason = QString {});
   void resumeFromIdle();
   void planIdleTxFrequency();
   int pickBestTxFreq(bool txFirstSlot) const;
-  bool ensurePlannedTxFreq();
+  bool ensurePlannedTxFreq(bool txFirstSlot);
   void armCandidate(Candidate const& candidate);
   void startActiveQso(QString const& call);
   void adoptExistingQso();
@@ -196,7 +210,7 @@ private:
   void backfillWorkedFromLogBook();
   void resumeFromPause();
   void log(QString const& category, QString const& detail) const;
-  QString scoreDetail(Candidate const& candidate) const;
+  QString scoreDetail(Candidate const& candidate, QDateTime const& nowUtc) const;
   void setLastDecision(QString const& action, QString const& reason,
                        QString const& scoreBreakdown = QString {});
   static QString slotText(bool txFirst);
@@ -214,6 +228,7 @@ private:
   ActiveQso activeQso_;
   bool hasActiveQso_ {false};
   int cycleIndex_ {0};
+  int spCyclesSinceStudy_ {0};
   QSet<QString> sessionDxccWorked_;
 };
 

@@ -1,6 +1,7 @@
 #ifndef FT8AUTOBOTWINDOW_HPP
 #define FT8AUTOBOTWINDOW_HPP
 
+#include <QObject>
 #include <QWidget>
 
 #include "widgets/FT8AutoBot.hpp"
@@ -30,6 +31,7 @@ public:
   void setDecisionLog(QStringList const& entries);
   void appendDecisionLog(QString const& entry);
   QString selectedDecisionLogText() const;
+  QSpinBox * studyAfterCyclesControl() const { return studyAfterCycles_; }
 
 Q_SIGNALS:
   void enableRequested(bool enabled);
@@ -68,6 +70,7 @@ private:
   QSpinBox * idleListenSeconds_;
   QLineEdit * cooldownMinutes_;
   QSpinBox * stuckCycleLimit_;
+  QSpinBox * studyAfterCycles_;
   QCheckBox * acceptRr73AsCq_;
   QCheckBox * wakeDuringIdle_;
   QSpinBox * idleTxPlanMin_;

@@ -6477,6 +6477,9 @@ void MainWindow::guiUpdate()
 
     if (m_mode != "FST4W" && m_mode != "WSPR" && m_mode!="Echo")
       {
+        if (m_ft8AutoBot && m_ft8AutoBot->enabled() && !m_tune) {
+          appendFT8AutoBotLog("TX", QStringLiteral("msg=%1").arg(m_currentMessage.trimmed()));
+        }
         if(!m_tune) write_all("Tx",m_currentMessage);
         if (m_config.TX_messages () && !m_tune && SpecOp::FOX!=m_specOp)
           {
@@ -8477,6 +8480,7 @@ void MainWindow::acceptQSO (QDateTime const& QSO_date_off, QString const& call, 
     }
     appendFT8AutoBotLog("QSO_OK", QString {"Logged %1 on %2 %3"}
                         .arg(call, m_config.bands()->find(dial_freq), mode));
+    updateFT8AutoBotWindow();
   }
   clearDX();
 
@@ -14818,6 +14822,7 @@ void MainWindow::botSetDx(QString const& call, QString const& grid, int rxFreq, 
     dxLookup(call, grid);
     appendFT8AutoBotLog("ARM", QString {"Prepared %1 on RX %2 Hz / TX %3 Hz"}
                         .arg(call, QString::number(rxFreq), QString::number(txFreq)));
+    updateFT8AutoBotWindow();
 }
 
 void MainWindow::botStartQso()
@@ -14825,6 +14830,7 @@ void MainWindow::botStartQso()
     useNextCall();
     on_txb1_clicked();
     appendFT8AutoBotLog("STATE", QString {"Started QSO with %1"}.arg(ui->dxCallEntry->text()));
+    updateFT8AutoBotWindow();
 }
 
 void MainWindow::botEnableAutoTx(bool on)
@@ -14848,6 +14854,7 @@ void MainWindow::botStartCQ()
     clearDX();
     auto_tx_mode(true);
     appendFT8AutoBotLog("CQ", "Calling CQ");
+    updateFT8AutoBotWindow();
 }
 
 void MainWindow::botSetAutoSequence(bool on)
@@ -15009,6 +15016,17 @@ void MainWindow::setFT8AutoBotStuckCycleLimit(int value)
     m_ft8AutoBot->setSettings(settings);
     saveFT8AutoBotSettings();
     appendFT8AutoBotLog("CONFIG", QStringLiteral("stuckCycleLimit=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotStudyAfterCycles(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.studyAfterCycles = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("studyAfterCycles=%1").arg(QString::number(value)));
     updateFT8AutoBotWindow();
 }
 
@@ -15182,6 +15200,7 @@ FT8AutoBotSettings MainWindow::loadFT8AutoBotSettings() const
     settings.cqIdleAfter = m_settings->value(QStringLiteral("ft8_autobot/cq_idle_after"), 10).toInt();
     settings.cooldownMinutes = m_settings->value(QStringLiteral("ft8_autobot/cooldown_minutes"), 30).toInt();
     settings.stuckCycleLimit = m_settings->value(QStringLiteral("ft8_autobot/stuck_cycle_limit"), 3).toInt();
+    settings.studyAfterCycles = m_settings->value(QStringLiteral("ft8_autobot/study_after_cycles"), 12).toInt();
     settings.acceptRr73AsCq = m_settings->value(QStringLiteral("ft8_autobot/accept_rr73_as_cq"), false).toBool();
     settings.wakeDuringIdleInCQMode = m_settings->value(QStringLiteral("ft8_autobot/wake_during_idle_cq"), true).toBool();
     settings.idleTxPlanMinHz = m_settings->value(QStringLiteral("ft8_autobot/idle_tx_plan_min_hz"), 1000).toInt();
@@ -15202,6 +15221,7 @@ void MainWindow::saveFT8AutoBotSettings()
     m_settings->setValue(QStringLiteral("ft8_autobot/cq_idle_after"), settings.cqIdleAfter);
     m_settings->setValue(QStringLiteral("ft8_autobot/cooldown_minutes"), settings.cooldownMinutes);
     m_settings->setValue(QStringLiteral("ft8_autobot/stuck_cycle_limit"), settings.stuckCycleLimit);
+    m_settings->setValue(QStringLiteral("ft8_autobot/study_after_cycles"), settings.studyAfterCycles);
     m_settings->setValue(QStringLiteral("ft8_autobot/accept_rr73_as_cq"), settings.acceptRr73AsCq);
     m_settings->setValue(QStringLiteral("ft8_autobot/wake_during_idle_cq"), settings.wakeDuringIdleInCQMode);
     m_settings->setValue(QStringLiteral("ft8_autobot/idle_tx_plan_min_hz"), settings.idleTxPlanMinHz);
@@ -15231,6 +15251,8 @@ void MainWindow::showFT8AutoBotWindow()
                 this, &MainWindow::setFT8AutoBotIdleListenSeconds);
         connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::stuckCycleLimitRequested,
                 this, &MainWindow::setFT8AutoBotStuckCycleLimit);
+        connect(m_ft8AutoBotView->studyAfterCyclesControl(), QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &MainWindow::setFT8AutoBotStudyAfterCycles);
         connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::acceptRr73AsCqRequested,
                 this, &MainWindow::setFT8AutoBotAcceptRr73AsCq);
         connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::wakeDuringIdleRequested,

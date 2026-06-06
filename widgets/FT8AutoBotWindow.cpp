@@ -41,6 +41,7 @@ QString stateText(FT8AutoBotState state)
   case FT8AutoBotState::Disabled: return QObject::tr("Disabled");
   case FT8AutoBotState::Paused: return QObject::tr("Paused");
   case FT8AutoBotState::Hunting: return QObject::tr("Hunting");
+  case FT8AutoBotState::Study: return QObject::tr("Study");
   case FT8AutoBotState::CallingCQ: return QObject::tr("Calling CQ");
   case FT8AutoBotState::AdoptingQSO: return QObject::tr("Adopting QSO");
   case FT8AutoBotState::Arming: return QObject::tr("Arming");
@@ -62,6 +63,7 @@ FT8AutoBotWindow::FT8AutoBotWindow(QWidget * parent)
   , idleListenSeconds_ {new QSpinBox {this}}
   , cooldownMinutes_ {makeReadOnlyLineEdit(this)}
   , stuckCycleLimit_ {new QSpinBox {this}}
+  , studyAfterCycles_ {new QSpinBox {this}}
   , acceptRr73AsCq_ {new QCheckBox {tr("Accept RR73 as CQ"), this}}
   , wakeDuringIdle_ {new QCheckBox {tr("Wake During Idle (CQ)"), this}}
   , idleTxPlanMin_ {new QSpinBox {this}}
@@ -109,6 +111,7 @@ FT8AutoBotWindow::FT8AutoBotWindow(QWidget * parent)
   cqIdleAfter_->setRange(1, 50);
   idleListenSeconds_->setRange(15, 600);
   stuckCycleLimit_->setRange(1, 10);
+  studyAfterCycles_->setRange(1, 100);
   idleTxPlanMin_->setRange(200, 4000);
   idleTxPlanMax_->setRange(500, 4000);
   idleTxPlanStep_->setRange(10, 200);
@@ -124,6 +127,7 @@ FT8AutoBotWindow::FT8AutoBotWindow(QWidget * parent)
   widenEditor(idleListenSeconds_);
   widenEditor(cooldownMinutes_, 170);
   widenEditor(stuckCycleLimit_);
+  widenEditor(studyAfterCycles_);
   widenEditor(idleTxPlanMin_);
   widenEditor(idleTxPlanMax_);
   widenEditor(idleTxPlanStep_);
@@ -164,6 +168,7 @@ FT8AutoBotWindow::FT8AutoBotWindow(QWidget * parent)
   controlsLayout->addRow(tr("Idle Listen Seconds"), idleListenSeconds_);
   controlsLayout->addRow(tr("Cooldown Minutes"), cooldownMinutes_);
   controlsLayout->addRow(tr("Stuck Cycle Limit"), stuckCycleLimit_);
+  controlsLayout->addRow(tr("Study After Cycles"), studyAfterCycles_);
   controlsLayout->addRow(QString {}, acceptRr73AsCq_);
   controlsLayout->addRow(QString {}, wakeDuringIdle_);
   controlsLayout->addRow(tr("Idle TX Min Hz"), idleTxPlanMin_);
@@ -283,6 +288,9 @@ void FT8AutoBotWindow::setSnapshot(FT8AutoBotSnapshot const& snapshot)
   setReadOnlyText(state_, stateText(snapshot.state));
   if (snapshot.state == FT8AutoBotState::Paused && !snapshot.pauseReason.isEmpty()) {
     setReadOnlyText(state_, QStringLiteral("%1 (%2)").arg(stateText(snapshot.state), snapshot.pauseReason));
+  } else if (snapshot.state == FT8AutoBotState::Study && snapshot.studyCyclesRemaining > 0) {
+    setReadOnlyText(state_, QStringLiteral("%1 (%2 left)").arg(stateText(snapshot.state),
+                                                               QString::number(snapshot.studyCyclesRemaining)));
   }
   QStringList targetParts;
   if (!snapshot.targetCall.isEmpty()) targetParts << snapshot.targetCall;
@@ -310,6 +318,7 @@ void FT8AutoBotWindow::setSettings(FT8AutoBotSettings const& settings)
   QSignalBlocker cqIdleBlocker {cqIdleAfter_};
   QSignalBlocker idleListenBlocker {idleListenSeconds_};
   QSignalBlocker stuckBlocker {stuckCycleLimit_};
+  QSignalBlocker studyBlocker {studyAfterCycles_};
   QSignalBlocker rr73Blocker {acceptRr73AsCq_};
   QSignalBlocker wakeBlocker {wakeDuringIdle_};
   QSignalBlocker txMinBlocker {idleTxPlanMin_};
@@ -324,6 +333,7 @@ void FT8AutoBotWindow::setSettings(FT8AutoBotSettings const& settings)
   idleListenSeconds_->setValue(settings.idleListenSeconds);
   setReadOnlyText(cooldownMinutes_, QString::number(settings.cooldownMinutes));
   stuckCycleLimit_->setValue(settings.stuckCycleLimit);
+  studyAfterCycles_->setValue(settings.studyAfterCycles);
   acceptRr73AsCq_->setChecked(settings.acceptRr73AsCq);
   wakeDuringIdle_->setChecked(settings.wakeDuringIdleInCQMode);
   idleTxPlanMin_->setValue(settings.idleTxPlanMinHz);

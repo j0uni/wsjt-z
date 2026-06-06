@@ -1155,6 +1155,7 @@ private:
   void setFT8AutoBotCqIdleAfter(int value);
   void setFT8AutoBotIdleListenSeconds(int value);
   void setFT8AutoBotStuckCycleLimit(int value);
+  void setFT8AutoBotStudyAfterCycles(int value);
   void setFT8AutoBotAcceptRr73AsCq(bool enabled);
   void setFT8AutoBotWakeDuringIdle(bool enabled);
   void setFT8AutoBotIdleTxPlanMin(int value);
