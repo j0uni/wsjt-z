@@ -49,6 +49,7 @@ See **[BUILD.md](BUILD.md)** for dependencies, CMake options, standard and no-`s
 - **Priority call queue** — promote callsigns of interest to the front of the call list
 - **Auto Call Next** — chain QSOs without operator intervention
 - **Band-hopper** — schedule automatic band changes by time-of-day or activity
+- **FT8 Auto Bot** — bot-owned FT8/FT4 Search & Pounce or CQ operation with score-based target selection, worked-memory tracking, cooldown after failed QSOs, idle back-off, stuck/QRM detection, and waterfall-based TX slot planning
 
 ### Filtering & highlighting
 - **Ignored stations list** — silence specific calls or prefixes
@@ -65,6 +66,8 @@ See **[BUILD.md](BUILD.md)** for dependencies, CMake options, standard and no-`s
 - **Performance work in the C++ hot path** — cached filter lists, reduced regex compilation, gated debug logging, tuned Fortran release flags
 
 ### Integration & UX
+- **QSO Monitor window** — dedicated visibility into automation decisions, current target, auto modes, and station context
+- **FT8 Auto Bot window** — dedicated monitor/control panel with live state, counters, target details, planned TX frequency, worked/cooldown memory, and rolling decision log
 - **QRZ.com lookup panel** — name, address, grid, biography
 - **Audio alerts** — configurable per-event sounds
 - **PSK Reporter integration**
