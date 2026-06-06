@@ -42,6 +42,7 @@
 #include "DisplayManual.hpp"
 #include "Network/PSKReporter.hpp"
 #include "logbook/logbook.h"
+#include "widgets/FT8AutoBot.hpp"
 #include "astro.h"
 #include "MessageBox.hpp"
 #include "Network/NetworkAccessManager.hpp"
@@ -78,6 +79,7 @@ class QSettings;
 class QLineEdit;
 class QFont;
 class QHostInfo;
+class QAction;
 class EchoGraph;
 class FastGraph;
 class WideGraph;
@@ -96,6 +98,7 @@ class WSPRBandHopping;
 class UnfilteredView;
 class PSKReporterWidget;
 class QSOMonitorWindow;
+class FT8AutoBotWindow;
 
 class HelpTextWindow;
 class WSPRNet;
@@ -110,6 +113,7 @@ class DecodedText;
 
 class MainWindow
   : public MultiGeometryWidget<3, QMainWindow>
+  , public FT8AutoBotHost
 {
   Q_OBJECT;
 
@@ -128,6 +132,33 @@ public:
   int decoderBusy () const {return m_decoderBusy;}
   // Z
   void log(QString s);
+  QString mode() const override;
+  QString band() const override;
+  QString myCall() const override;
+  QString myGrid() const override;
+  QString dxCall() const override;
+  QString logBookPath() const override;
+  int qsoProgress() const override;
+  bool transmitting() const override;
+  bool autoEnabled() const override;
+  bool txFirst() const override;
+  int trPeriodSeconds() const override;
+  QString countryForCall(QString const& call) const override;
+  bool countryWorked(QString const& country, QString const& mode, QString const& band) const override;
+  bool callWorkedGlobally(QString const& call) const override;
+  bool callsignFiltered(DecodedText const& decoded) const override;
+  bool tailenderCandidate(DecodedText const& decoded) const override;
+  QVector<int> busyTxBins(int hzMin, int hzMax, int stepHz, bool txFirstSlot) const override;
+  void botLog(QString const& category, QString const& detail) override;
+  void botSetDx(QString const& call, QString const& grid, int rxFreq, int txFreq,
+                int reportDb, bool txFirst) override;
+  void botStartQso() override;
+  void botEnableAutoTx(bool on) override;
+  void botClearDx() override;
+  void botStopTx() override;
+  void botStartCQ() override;
+  void botSetAutoSequence(bool on) override;
+  void botSetTxFreq(int txFreq) override;
 
 public slots:
   void showSoundInError(const QString& errorMsg);
@@ -444,6 +475,7 @@ private slots:
      void on_actionUnfiltered_View_triggered();
      void on_actionPSKReporter_triggered();
      void on_actionQSO_Monitor_triggered();
+     void onFT8AutoBotActionToggled(bool checked);
      void updateQsoCounter(bool increment);
      void on_txFirstCheckBox_toggled();
 
@@ -749,6 +781,8 @@ private:
   QScopedPointer<UnfilteredView> m_unfilteredView;
   QScopedPointer<PSKReporterWidget> m_pskReporterView;
   QScopedPointer<QSOMonitorWindow> m_qsoMonitorView;
+  QScopedPointer<FT8AutoBotWindow> m_ft8AutoBotView;
+  QScopedPointer<FT8AutoBot> m_ft8AutoBot;
   QThread * m_pskReporterThread;
   QDateTime m_ignoreListReset;
   qint64 m_msTxFirst;
@@ -759,6 +793,16 @@ private:
   QByteArray m_unfilteredViewGeometry;
   QByteArray m_pskReporterViewGeometry;
   QByteArray m_qsoMonitorViewGeometry;
+  QByteArray m_ft8AutoBotViewGeometry;
+  QStringList m_ft8AutoBotEntries;
+  QAction * m_ft8AutoBotAction = nullptr;
+  bool m_ft8AutoBotRestoreAutoCQ = false;
+  bool m_ft8AutoBotRestoreAutoCall = false;
+  bool m_ft8AutoBotRestoreAutoCallNext = false;
+  bool m_ft8AutoBotRestoreAutoSeq = false;
+  int m_ft8AutoBotLastQsoProgress = -1;
+  QString m_ft8AutoBotLogDate;
+  bool m_ft8AutoBotMultipleInstanceWarned = false;
 
   struct QsoMonitorStationSnapshot
   {
@@ -827,6 +871,7 @@ private:
   QLabel mode_switch_status_label;
   QProgressBar progressBar;
   QLabel watchdog_label;
+  QCheckBox * m_ft8AutoBotToggle = nullptr;
 
   QFuture<void> m_wav_future;
   QFutureWatcher<void> m_wav_future_watcher;
@@ -1103,6 +1148,36 @@ private:
   void to_jt9(qint32 n, qint32 istart, qint32 idone);
   bool is77BitMode () const;
   void cease_auto_Tx_after_QSO ();
+  void setFT8AutoBotEnabled(bool enabled);
+  void setFT8AutoBotMode(FT8AutoBotMode mode);
+  void setFT8AutoBotReuseFilters(bool enabled);
+  void setFT8AutoBotMinScore(int value);
+  void setFT8AutoBotCqIdleAfter(int value);
+  void setFT8AutoBotIdleListenSeconds(int value);
+  void setFT8AutoBotStuckCycleLimit(int value);
+  void setFT8AutoBotAcceptRr73AsCq(bool enabled);
+  void setFT8AutoBotWakeDuringIdle(bool enabled);
+  void setFT8AutoBotIdleTxPlanMin(int value);
+  void setFT8AutoBotIdleTxPlanMax(int value);
+  void setFT8AutoBotIdleTxPlanStep(int value);
+  void setFT8AutoBotAdoptionGracePeriods(int value);
+  void setFT8AutoBotLogToFile(bool enabled);
+  void updateFT8AutoBotWindow();
+  void appendFT8AutoBotLog(QString const& category, QString const& detail);
+  void showFT8AutoBotWindow();
+  void restoreFT8AutoBotControls();
+  void captureFT8AutoBotControlSnapshot();
+  void pauseFT8AutoBotForContextChange(QString const& reason);
+  void disableFT8AutoBotForContextChange(QString const& reason);
+  void maybeDisableFT8AutoBotForModeChange(QString const& previousMode, QString const& nextMode);
+  bool isFT8AutoBotSupportedMode(QString const& mode) const;
+  QString ft8AutoBotLogFilePath(QDate const& date) const;
+  void writeFT8AutoBotLogEntry(QString const& category, QString const& detail);
+  void pruneFT8AutoBotLogFiles(QDir& logDir, QDate const& today);
+  bool confirmFT8AutoBotMemoryClear(QString const& title, QString const& text);
+  void warnFT8AutoBotMultipleInstancesIfNeeded();
+  FT8AutoBotSettings loadFT8AutoBotSettings() const;
+  void saveFT8AutoBotSettings();
   Q_SLOT void ARRL_Digi_Display();
   void ARRL_Digi_Update(DecodedText dt);
   void activeWorked(QString call, QString band);

@@ -39,6 +39,8 @@ public:
               AD1CCty::Record const&, bool& callB4, bool& countryB4,
               bool &gridB4, bool &continentB4, bool& CQZoneB4, bool& ITUZoneB4,
               QString const& currentBand = QString {}) const;
+  bool country_worked(QString const& country, QString const& mode, QString const& band) const;
+  bool call_worked(QString const& call, QString const& mode, QString const& band) const;
   QByteArray QSOToADIF (QString const& hisCall, QString const& hisGrid, QString const& mode,
                         QString const& rptSent, QString const& rptRcvd, QDateTime const& dateTimeOn,
                         QDateTime const& dateTimeOff, QString const& band, QString const& comments,

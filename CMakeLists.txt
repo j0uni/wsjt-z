@@ -219,6 +219,9 @@ set (wsjt_qt_CXXSRCS
   Network/NetworkMessage.cpp
   Network/MessageClient.cpp
   widgets/LettersSpinBox.cpp
+  widgets/FT8AutoBot.cpp
+  widgets/FT8AutoBotMemory.cpp
+  widgets/FT8AutoBotWindow.cpp
   widgets/QSOMonitorWindow.cpp
   widgets/HintedSpinBox.cpp
   widgets/RestrictedSpinBox.cpp
