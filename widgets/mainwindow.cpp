@@ -6392,8 +6392,7 @@ void MainWindow::guiUpdate()
         icw[0] = m_ncw;
       }
       // Z
-      if((m_config.prompt_to_log() or m_config.autoLog()
-          or ui->cbAutoCQ->isChecked() or ui->cbAutoCall->isChecked()) && !m_tune && CALLING != m_QSOProgress)
+      if(!m_tune && CALLING != m_QSOProgress)
         {
           logQSOTimer.start(0);
         }
@@ -6478,6 +6477,14 @@ void MainWindow::guiUpdate()
     if (m_mode != "FST4W" && m_mode != "WSPR" && m_mode!="Echo")
       {
         if (m_ft8AutoBot && m_ft8AutoBot->enabled() && !m_tune) {
+          auto const txText = m_currentMessage.trimmed();
+          if (m_ft8AutoBot->mode() == FT8AutoBotMode::CQ
+              && !txText.startsWith(QStringLiteral("CQ "))
+              && !txText.startsWith(QStringLiteral("QRZ "))
+              && m_bCallingCQ) {
+            appendFT8AutoBotLog("CQ_PICK", QStringLiteral("call=%1 msg=%2")
+                                .arg(ui->dxCallEntry->text().trimmed(), txText));
+          }
           appendFT8AutoBotLog("TX", QStringLiteral("msg=%1").arg(m_currentMessage.trimmed()));
         }
         if(!m_tune) write_all("Tx",m_currentMessage);
@@ -7342,12 +7349,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
           m_nextCall="";   //### Temporary: disable use of "TU;" message
           if(SpecOp::RTTY == m_specOp and m_nextCall!="") {
             // We're in RTTY contest and have "nextCall" queued up: send a "TU; ..." message
-            if (m_config.prompt_to_log() || m_config.autoLog()) {
-              logQSOTimer.start(0);
-            }
-            else {
-              cease_auto_Tx_after_QSO ();
-            }
+            logQSOTimer.start(0);
             ui->tx3->setText(ui->tx3->text().remove("TU; "));
             useNextCall();
             QString t="TU; " + ui->tx3->text();
@@ -7356,12 +7358,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
           } else {
             if (false)              // Always Send 73 after receiving RRR or RR73, even in contest mode.
               {
-                if (m_config.prompt_to_log() || m_config.autoLog()) {
-                  logQSOTimer.start(0);
-                }
-                else {
-                  cease_auto_Tx_after_QSO ();
-                }
+                logQSOTimer.start(0);
                 m_ntx=6;
                 ui->txrb6->setChecked(true);
               }
@@ -7379,12 +7376,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
               }
             else if (ROGERS == m_QSOProgress)
               {
-                if (m_config.prompt_to_log() || m_config.autoLog()) {
-                  logQSOTimer.start(0);
-                }
-                else {
-                  cease_auto_Tx_after_QSO ();
-                }
+                logQSOTimer.start(0);
                 m_ntx=6;
                 ui->txrb6->setChecked(true);
               }
@@ -7454,12 +7446,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
     else if (5 == message_words.size ()
              && m_baseCall == message_words.at (1)) {
       // dual Fox style message, possibly from MSHV
-      if (m_config.prompt_to_log() || m_config.autoLog()) {
-        logQSOTimer.start(0);
-      }
-      else {
-        cease_auto_Tx_after_QSO ();
-      }
+      logQSOTimer.start(0);
       m_ntx=6;
       ui->txrb6->setChecked(true);
     }

@@ -346,6 +346,7 @@ void FT8AutoBot::onQsoProgress(int qsoProgress)
 
   if (qsoProgress == qsoProgressCallingValue()
       && activeQso_.maxProgressSeen >= 4) {
+    syncLoggedQso(activeQso_.call, host_->band(), host_->mode(), true);
     log(QStringLiteral("STATE"), QStringLiteral("progress_reset call=%1 from=%2 to=%3 action=release")
         .arg(activeQso_.call,
              QString::number(activeQso_.lastProgress),
@@ -405,10 +406,10 @@ void FT8AutoBot::onQsoLogged(QString const& call, QString const&, QString const&
 void FT8AutoBot::syncLoggedQso(QString const& call, QString const&, QString const&, bool botOwned)
 {
   auto const country = host_->countryForCall(call);
-  memory_.addWorked(call);
+  auto const addedWorked = memory_.addWorked(call);
   memory_.removeCooldown(call);
 
-  if (botOwned) {
+  if (botOwned && addedWorked) {
     ++counters_.qsosCompleted;
     if (activeQso_.wasNewDx && !country.isEmpty() && !sessionDxccWorked_.contains(country)) {
       sessionDxccWorked_.insert(country);
@@ -425,7 +426,7 @@ void FT8AutoBot::syncLoggedQso(QString const& call, QString const&, QString cons
   log(QStringLiteral("QSO_OK"), QStringLiteral("call=%1 country=%2 new_dx=%3 worked_count=%4 source=%5")
       .arg(normalizedBase(call),
            country,
-           (botOwned && activeQso_.wasNewDx) ? QStringLiteral("yes") : QStringLiteral("no"),
+           (botOwned && addedWorked && activeQso_.wasNewDx) ? QStringLiteral("yes") : QStringLiteral("no"),
            QString::number(memory_.workedCount()),
            botOwned ? QStringLiteral("bot") : QStringLiteral("external")));
 }

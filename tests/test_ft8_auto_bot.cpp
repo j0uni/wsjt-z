@@ -723,9 +723,44 @@ private Q_SLOTS:
     bot.onQsoProgress(0);
 
     QCOMPARE(bot.state(), FT8AutoBotState::Hunting);
+    QVERIFY(bot.memory().isWorked(QStringLiteral("G3AKA")));
     QVERIFY(!bot.memory().isOnCooldown(QStringLiteral("G3AKA")));
+    QCOMPARE(bot.counters().qsosCompleted, 1);
     QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
       return entry.contains(QStringLiteral("progress_reset"));
+    }));
+  }
+
+  void late_stage_progress_reset_blocks_same_station_on_next_cycle()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("TY5AD"), QStringLiteral("Benin"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ TY5AD JJ16"), 263)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(host.armedCall, QStringLiteral("TY5AD"));
+
+    bot.onQsoProgress(1);
+    bot.onQsoProgress(3);
+    bot.onQsoProgress(5);
+    bot.onQsoProgress(0);
+
+    QCOMPARE(bot.state(), FT8AutoBotState::Hunting);
+    QVERIFY(bot.memory().isWorked(QStringLiteral("TY5AD")));
+
+    host.dxCallValue.clear();
+    auto const armsBefore = host.startQsoCalls;
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ TY5AD JJ16"), 263)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(host.startQsoCalls, armsBefore);
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("SCORE:skipped=TY5AD reason=worked_file"));
     }));
   }
 
@@ -761,6 +796,28 @@ private Q_SLOTS:
     QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
       return entry.contains(QStringLiteral("QSO_OK:call=VK6XYZ country=Australia new_dx=yes"));
     }));
+  }
+
+  void duplicate_logged_qso_after_progress_reset_does_not_double_count()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("VK6XYZ"), QStringLiteral("Australia"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ VK6XYZ OF87"))});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    bot.onQsoProgress(1);
+    bot.onQsoProgress(4);
+    bot.onQsoProgress(0);
+    QCOMPARE(bot.counters().qsosCompleted, 1);
+
+    bot.onQsoLogged(QStringLiteral("VK6XYZ"), QStringLiteral("20m"), QStringLiteral("FT8"));
+
+    QCOMPARE(bot.counters().qsosCompleted, 1);
+    QCOMPARE(bot.counters().newDxcc, 1);
   }
 
   void invalid_settings_are_sanitized_before_use()
