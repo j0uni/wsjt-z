@@ -18,7 +18,9 @@
 #include <QProcessEnvironment>
 #include <QSharedMemory>
 #include <QFileDialog>
+#include <QFile>
 #include <QTextBlock>
+#include <QTextStream>
 #include <QProgressBar>
 #include <QLineEdit>
 #include <QRegExpValidator>
@@ -42,6 +44,9 @@
 #include <QUdpSocket>
 #include <QAbstractItemView>
 #include <QInputDialog>
+#include <QGuiApplication>
+#include <QClipboard>
+#include <QCheckBox>
 #if QT_VERSION >= QT_VERSION_CHECK (5, 15, 0)
 #include <QRandomGenerator>
 #endif
@@ -54,9 +59,12 @@
 #include <QHash>
 #include <QXmlStreamReader>
 #include <QTableWidgetItem>
+#include <QMenu>
 #include <QSqlQuery>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include "QSOMonitorWindow.hpp"
+#include "FT8AutoBotWindow.hpp"
 #include "unfilteredview.h"
 #include "pskreporterwidget.h"
 
@@ -523,10 +531,25 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
      ui->decodedTextBrowser->addAction(ui->actionIgnore_station);
      ui->decodedTextBrowser->addAction(ui->actionCall_next);
      ui->decodedTextBrowser->addAction(ui->actionClear);
-     ui->decodedTextBrowser->addAction(ui->actionSet_Rx_Freq);
-     ui->decodedTextBrowser->addAction(ui->actionQRZ_Lookup);
-     ui->decodedTextBrowser->addAction(ui->actionCopy);
+  ui->decodedTextBrowser->addAction(ui->actionSet_Rx_Freq);
+  ui->decodedTextBrowser->addAction(ui->actionQRZ_Lookup);
+  ui->decodedTextBrowser->addAction(ui->actionCopy);
   ui->decodedTextBrowser->setBandActivity(true);
+
+  m_ft8AutoBot.reset(new FT8AutoBot {this, m_config.writeable_data_dir()});
+  m_ft8AutoBotViewGeometry = m_settings->value(QStringLiteral("ft8_autobot_geometry"),
+                                               m_settings->value(QStringLiteral("ft8_autobot/geometry"))).toByteArray();
+  m_ft8AutoBot->setSettings(loadFT8AutoBotSettings());
+  m_ft8AutoBot->setMode(static_cast<FT8AutoBotMode>(
+      m_settings->value(QStringLiteral("ft8_autobot/mode"),
+                        static_cast<int>(FT8AutoBotMode::SearchAndPounce)).toInt()));
+  m_ft8AutoBotAction = new QAction {tr("FT8 Auto Bot"), this};
+  m_ft8AutoBotAction->setCheckable(true);
+  ui->menuTools->addAction(m_ft8AutoBotAction);
+  connect(m_ft8AutoBotAction, &QAction::toggled, this, &MainWindow::onFT8AutoBotActionToggled);
+  if (m_ft8AutoBotToggle) {
+      m_ft8AutoBotToggle->setChecked(false);
+  }
 
 
   m_optimizingProgress.setWindowModality (Qt::WindowModal);
@@ -622,6 +645,11 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
           // Z
           qso_total = record_count;
           updateQsoCounter(false);
+          if (m_ft8AutoBot) {
+            m_ft8AutoBot->refreshWorkedFromLogBook();
+            appendFT8AutoBotLog("WORKED", QStringLiteral("Refreshed worked set from logbook reload"));
+            updateFT8AutoBotWindow();
+          }
         }
     });
 
@@ -1009,6 +1037,15 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
 
   TxAgainTimer.setSingleShot(true);
   connect(&TxAgainTimer, SIGNAL(timeout()), this, SLOT(TxAgain()));
+
+  m_ft8AutoBotSafetyTimer.setSingleShot(true);
+  connect(&m_ft8AutoBotSafetyTimer, &QTimer::timeout, this, [this] {
+    if (!m_ft8AutoBot || !m_ft8AutoBot->enabled()) return;
+    appendFT8AutoBotLog("SAFETY", QStringLiteral("Auto-disabled after 2 hours; manual re-enable required"));
+    statusBar()->showMessage(tr("FT8 Auto Bot auto-disabled after 2 hours"), 5000);
+    auto_tx_mode(false);
+    setFT8AutoBotEnabled(false);
+  });
 
   connect(m_wideGraph.data (), SIGNAL(setFreq3(int,int)),this,
           SLOT(setFreq4(int,int)));
@@ -1590,6 +1627,7 @@ void MainWindow::writeSettings()
   m_settings->setValue ("darkMode", ui->actionDark_mode->isChecked());
   m_settings->setValue ("rawViewDisplayed", m_unfilteredView && m_unfilteredView->isVisible ());
   m_settings->setValue ("pskViewDisplayed", m_pskReporterView && m_pskReporterView->isVisible ());
+  m_settings->setValue ("qsoMonitorDisplayed", m_qsoMonitorView && m_qsoMonitorView->isVisible ());
   m_settings->setValue ("txFirstLock",  m_TxFirstLock);
 
   if (m_unfilteredView && m_unfilteredView->isVisible ()) {
@@ -1598,6 +1636,10 @@ void MainWindow::writeSettings()
 
   if (m_pskReporterView && m_pskReporterView->isVisible ()) {
       m_settings->setValue ("pskViewGeometry", m_pskReporterView->saveGeometry() );
+  }
+
+  if (m_qsoMonitorView && m_qsoMonitorView->isVisible ()) {
+      m_settings->setValue ("qsoMonitorGeometry", m_qsoMonitorView->saveGeometry() );
   }
 
   // Misc tab
@@ -1827,8 +1869,10 @@ void MainWindow::readSettings()
   ui->tx1->setEnabled(m_settings->value("tx1State", true).toBool());
   m_unfilteredViewGeometry = m_settings->value("rawViewGeometry").toByteArray();
   m_pskReporterViewGeometry = m_settings->value("pskViewGeometry").toByteArray();
+  m_qsoMonitorViewGeometry = m_settings->value("qsoMonitorGeometry").toByteArray();
   auto showRawView =m_settings->value("rawViewDisplayed", false).toBool();
   auto showPskView =m_settings->value("pskViewDisplayed", false).toBool();
+  auto showQsoMonitor =m_settings->value("qsoMonitorDisplayed", false).toBool();
   m_TxFirstLock = m_settings->value("txFirstLock", false).toBool();
 
 
@@ -1934,6 +1978,10 @@ void MainWindow::readSettings()
   // Z
   if (showRawView) on_actionUnfiltered_View_triggered();
   if (showPskView) on_actionPSKReporter_triggered();
+  if (showQsoMonitor) {
+    ui->actionQSO_Monitor->setChecked (true);
+    on_actionQSO_Monitor_triggered ();
+  }
   if (m_TxFirstLock) ui->txFirstCheckBox->setStyleSheet("background-color: #ff0000;");
 }
 
@@ -3309,6 +3357,10 @@ void MainWindow::createStatusBar()                           //createStatusBar
   // Z
   progressBar.setAlignment(Qt::AlignCenter);
 
+  m_ft8AutoBotToggle = new QCheckBox {tr("FT8 Bot"), this};
+  m_ft8AutoBotToggle->setToolTip(tr("Enable or disable FT8 Auto Bot"));
+  statusBar()->addPermanentWidget(m_ft8AutoBotToggle);
+  connect(m_ft8AutoBotToggle, &QCheckBox::toggled, this, &MainWindow::setFT8AutoBotEnabled);
 
   statusBar ()->addPermanentWidget (&watchdog_label);
   update_watchdog_label ();
@@ -5176,6 +5228,9 @@ void MainWindow::readFromStdout()                             //readFromStdout
       // Z
       auto isFiltered = callsignFiltered(decodedtext0);
       addSlot(decodedtext.frequencyOffset());
+      if (m_ft8AutoBot && m_ft8AutoBot->enabled()) {
+        m_ft8AutoBot->onDecode(decodedtext);
+      }
 
       auto for_us  = decodedtext.string().contains(" " + my_call + " ") or
               decodedtext.string().contains(" "+m_baseCall) or
@@ -5725,6 +5780,9 @@ void MainWindow::auto_sequence (DecodedText const& message, unsigned start_toler
       // auto stop to avoid accidental QRM
         // Z
         if (m_zdebug) log("Automatic TX halt");
+      if (m_ft8AutoBot && m_ft8AutoBot->enabled()) {
+        m_ft8AutoBot->onQrmDetected(ui->dxCallEntry->text().trimmed());
+      }
       ui->stopTxButton->click (); // halt any transmission
       LOG_INFO("STOPPED!");
       if (ui->cbAutoCQ->isChecked() || ui->cbAutoCall->isChecked()) clearDX();
@@ -6343,8 +6401,7 @@ void MainWindow::guiUpdate()
         icw[0] = m_ncw;
       }
       // Z
-      if((m_config.prompt_to_log() or m_config.autoLog()
-          or ui->cbAutoCQ->isChecked() or ui->cbAutoCall->isChecked()) && !m_tune && CALLING != m_QSOProgress)
+      if(!m_tune && CALLING != m_QSOProgress)
         {
           logQSOTimer.start(0);
         }
@@ -6428,6 +6485,18 @@ void MainWindow::guiUpdate()
 
     if (m_mode != "FST4W" && m_mode != "WSPR" && m_mode!="Echo")
       {
+        if (m_ft8AutoBot && m_ft8AutoBot->enabled() && !m_tune) {
+          auto const txText = m_currentMessage.trimmed();
+          if (m_ft8AutoBot->mode() == FT8AutoBotMode::CQ
+              && !txText.startsWith(QStringLiteral("CQ "))
+              && !txText.startsWith(QStringLiteral("QRZ "))
+              && m_bCallingCQ) {
+            appendFT8AutoBotLog("CQ_PICK", QStringLiteral("call=%1 msg=%2")
+                                .arg(ui->dxCallEntry->text().trimmed(), txText));
+          }
+          appendFT8AutoBotLog("TX", QStringLiteral("msg=%1").arg(m_currentMessage.trimmed()));
+          m_ft8AutoBot->onTransmitStarted(m_currentMessage.trimmed(), QDateTime::currentDateTimeUtc());
+        }
         if(!m_tune) write_all("Tx",m_currentMessage);
         if (m_config.TX_messages () && !m_tune && SpecOp::FOX!=m_specOp)
           {
@@ -6633,6 +6702,12 @@ void MainWindow::guiUpdate()
   if(m_tci_audio) {
     Q_EMIT m_config.transceiver_volume(m_config.volume());
   }
+  if (m_ft8AutoBot && m_ft8AutoBot->enabled() && m_ft8AutoBotLastQsoProgress != m_QSOProgress) {
+    m_ft8AutoBotLastQsoProgress = m_QSOProgress;
+    m_ft8AutoBot->onQsoProgress(m_QSOProgress);
+  }
+  update_qso_monitor ();
+  updateFT8AutoBotWindow();
 }               //End of guiUpdate
 
 void MainWindow::useNextCall()
@@ -7284,12 +7359,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
           m_nextCall="";   //### Temporary: disable use of "TU;" message
           if(SpecOp::RTTY == m_specOp and m_nextCall!="") {
             // We're in RTTY contest and have "nextCall" queued up: send a "TU; ..." message
-            if (m_config.prompt_to_log() || m_config.autoLog()) {
-              logQSOTimer.start(0);
-            }
-            else {
-              cease_auto_Tx_after_QSO ();
-            }
+            logQSOTimer.start(0);
             ui->tx3->setText(ui->tx3->text().remove("TU; "));
             useNextCall();
             QString t="TU; " + ui->tx3->text();
@@ -7298,12 +7368,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
           } else {
             if (false)              // Always Send 73 after receiving RRR or RR73, even in contest mode.
               {
-                if (m_config.prompt_to_log() || m_config.autoLog()) {
-                  logQSOTimer.start(0);
-                }
-                else {
-                  cease_auto_Tx_after_QSO ();
-                }
+                logQSOTimer.start(0);
                 m_ntx=6;
                 ui->txrb6->setChecked(true);
               }
@@ -7321,12 +7386,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
               }
             else if (ROGERS == m_QSOProgress)
               {
-                if (m_config.prompt_to_log() || m_config.autoLog()) {
-                  logQSOTimer.start(0);
-                }
-                else {
-                  cease_auto_Tx_after_QSO ();
-                }
+                logQSOTimer.start(0);
                 m_ntx=6;
                 ui->txrb6->setChecked(true);
               }
@@ -7396,12 +7456,7 @@ void MainWindow::processMessage (DecodedText const& message, Qt::KeyboardModifie
     else if (5 == message_words.size ()
              && m_baseCall == message_words.at (1)) {
       // dual Fox style message, possibly from MSHV
-      if (m_config.prompt_to_log() || m_config.autoLog()) {
-        logQSOTimer.start(0);
-      }
-      else {
-        cease_auto_Tx_after_QSO ();
-      }
+      logQSOTimer.start(0);
       m_ntx=6;
       ui->txrb6->setChecked(true);
     }
@@ -7916,6 +7971,7 @@ void MainWindow::clearDX ()
     ui->txrb6->setChecked(true);
   }
   m_QSOProgress = CALLING;
+  update_qso_monitor ();
 }
 
 void MainWindow::lookup()
@@ -8413,6 +8469,16 @@ void MainWindow::acceptQSO (QDateTime const& QSO_date_off, QString const& call, 
 
   // Z
   updateQsoCounter(true);
+  if (m_ft8AutoBot) {
+    if (m_ft8AutoBot->enabled()) {
+      m_ft8AutoBot->onQsoLogged(call, m_config.bands()->find(dial_freq), mode);
+    } else {
+      m_ft8AutoBot->syncLoggedQso(call, m_config.bands()->find(dial_freq), mode, false);
+    }
+    appendFT8AutoBotLog("QSO_OK", QString {"Logged %1 on %2 %3"}
+                        .arg(call, m_config.bands()->find(dial_freq), mode));
+    updateFT8AutoBotWindow();
+  }
   clearDX();
 
   // Log to N1MM Logger
@@ -8574,12 +8640,14 @@ void MainWindow::displayWidgets(qint64 n)
 
 void MainWindow::on_actionFST4_triggered()
 {
+  auto const previousMode = m_mode;
   QTimer::singleShot (50, [=] {
     ui->TxFreqSpinBox->setValue(m_settings->value("TxFreq_old",1500).toInt());
     ui->RxFreqSpinBox->setValue(m_settings->value("RxFreq_old",1500).toInt());
     on_sbSubmode_valueChanged(ui->sbSubmode->value());
   });
   m_mode="FST4";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -8626,7 +8694,9 @@ void MainWindow::on_actionFST4_triggered()
 
 void MainWindow::on_actionFST4W_triggered()
 {
+  auto const previousMode = m_mode;
   m_mode="FST4W";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -8661,6 +8731,7 @@ void MainWindow::on_actionFST4W_triggered()
 
 void MainWindow::on_actionFT2_triggered()
 {
+  auto const previousMode = m_mode;
   // FT2 = FAST FT4: 3.75 s T/R period, twice the tone spacing of FT4 (wider band,
   // shorter cycle). Reuses FT4 decoder with audio stretched 2x (see lib/decoder.f90
   // nmode=52). DT is halved and frequency doubled in the ft2_decoded callback.
@@ -8676,6 +8747,7 @@ void MainWindow::on_actionFT2_triggered()
     on_sbSubmode_valueChanged(ui->sbSubmode->value());
   });
   m_mode="FT2";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -8727,12 +8799,14 @@ void MainWindow::on_actionFT2_triggered()
 
 void MainWindow::on_actionFT4_triggered()
 {
+  auto const previousMode = m_mode;
   QTimer::singleShot (50, [=] {
     ui->TxFreqSpinBox->setValue(m_settings->value("TxFreq_old",1500).toInt());
     ui->RxFreqSpinBox->setValue(m_settings->value("RxFreq_old",1500).toInt());
     on_sbSubmode_valueChanged(ui->sbSubmode->value());
   });
   m_mode="FT4";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -8785,12 +8859,14 @@ void MainWindow::on_actionFT4_triggered()
 
 void MainWindow::on_actionFT8_triggered()
 {
+  auto const previousMode = m_mode;
   QTimer::singleShot (50, [=] {
     if(m_specOp!=SpecOp::FOX) ui->TxFreqSpinBox->setValue(m_settings->value("TxFreq_old",1500).toInt());
     if(m_specOp==SpecOp::FOX && !m_config.superFox()) ui->TxFreqSpinBox->setValue(m_TxFreqFox);
     on_sbSubmode_valueChanged(ui->sbSubmode->value());
   });
   m_mode="FT8";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   bool bVHF=m_config.enable_VHF_features();
   m_bFast9=false;
   m_bFastMode=false;
@@ -8941,11 +9017,13 @@ void MainWindow::on_actionFT8_triggered()
 
 void MainWindow::on_actionJT4_triggered()
 {
+  auto const previousMode = m_mode;
   QTimer::singleShot (50, [=] {
     ui->TxFreqSpinBox->setValue(m_settings->value("TxFreq_old",1500).toInt());
     ui->RxFreqSpinBox->setValue(m_settings->value("RxFreq_old",1500).toInt());
   });
   m_mode="JT4";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9000,7 +9078,9 @@ void MainWindow::on_actionJT4_triggered()
 
 void MainWindow::on_actionJT9_triggered()
 {
+  auto const previousMode = m_mode;
   m_mode="JT9";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9149,11 +9229,13 @@ void MainWindow::on_actionJT65_triggered()
 
 void MainWindow::on_actionQ65_triggered()
 {
+  auto const previousMode = m_mode;
   QTimer::singleShot (50, [=] {
     ui->TxFreqSpinBox->setValue(m_settings->value("TxFreq_old",1500).toInt());
     ui->RxFreqSpinBox->setValue(m_settings->value("RxFreq_old",1500).toInt());
   });
   m_mode="Q65";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9243,7 +9325,9 @@ void MainWindow::on_actionMSK144_triggered()
        "MSK144 not available if Fox, Hound, Field Day, FT Roundup, WW Digi. or ARRL Digi contest is selected.");
     return;
   }
+  auto const previousMode = m_mode;
   m_mode="MSK144";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9309,7 +9393,9 @@ void MainWindow::on_actionMSK144_triggered()
 
 void MainWindow::on_actionWSPR_triggered()
 {
+  auto const previousMode = m_mode;
   m_mode="WSPR";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9347,6 +9433,7 @@ void MainWindow::on_actionWSPR_triggered()
 
 void MainWindow::on_actionEcho_triggered()
 {
+  auto const previousMode = m_mode;
   int nd=int(m_ndepth&3);
   on_actionJT4_triggered();
 // Don't allow decoding depth to be changed just because Echo mode was entered:
@@ -9355,6 +9442,7 @@ void MainWindow::on_actionEcho_triggered()
   if(nd==3) ui->actionDeepestDecode->setChecked (true);
 
   m_mode="Echo";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9396,8 +9484,10 @@ void MainWindow::on_actionEcho_triggered()
 
 void MainWindow::on_actionFreqCal_triggered()
 {
+  auto const previousMode = m_mode;
   on_actionJT9_triggered();
   m_mode="FreqCal";
+  maybeDisableFT8AutoBotForModeChange(previousMode, m_mode);
   if(m_specOp==SpecOp::HOUND) {
     m_config.setSpecial_None();
     m_specOp=m_config.special_op_id();
@@ -9760,6 +9850,8 @@ void MainWindow::on_bandComboBox_activated (int index)
 
 void MainWindow::band_changed (Frequency f)
 {
+  auto const previousBand = m_currentBand;
+  auto const newBand = m_config.bands ()->find (f);
   // Don't allow a7 decodes during the first period because they can be leftovers from the previous band
   no_a7_decodes = true;
   QTimer::singleShot ((int(1500.0*m_TRperiod)), [=] {no_a7_decodes = false;});
@@ -9776,6 +9868,10 @@ void MainWindow::band_changed (Frequency f)
   }
 
   if (m_bandEdited) {
+    if (!previousBand.isEmpty() && previousBand != newBand) {
+      pauseFT8AutoBotForContextChange(QStringLiteral("Bot paused for band change %1 -> %2")
+                                      .arg(previousBand, newBand));
+    }
     if (m_mode!="WSPR") { // band hopping preserves auto Tx
       if (f + m_wideGraph->nStartFreq () > m_freqNominal + ui->TxFreqSpinBox->value ()
           || f + m_wideGraph->nStartFreq () + m_wideGraph->fSpan () <=
@@ -11510,6 +11606,9 @@ void MainWindow::tx_watchdog (bool triggered)
   if (triggered)
     {
       if (m_zdebug) log("TXWatchdog: TRUE");
+      if (m_ft8AutoBot && m_ft8AutoBot->enabled()) {
+        m_ft8AutoBot->onWatchdogTriggered();
+      }
       m_bTxTime=false;
       // Z
       if (ui->cbAutoCall->isChecked() && ui->cb_IgnoreAfterWD->isChecked())
@@ -13031,15 +13130,20 @@ void MainWindow::on_cbAutoCall_toggled(bool b)
         ui->cb_filtering->setEnabled(false);
         resetAutoSwitch();
         if (!m_autoModeSwitch) clearDX();
+        append_qso_monitor_log ("Auto Call", "Enabled. CQ-only filtering and new-on-band guardrails are active.");
+        set_qso_monitor_decision ("Auto Call enabled", "Waiting for a CQ or RR73 that passes the current filters.");
     } else {
         ui->cbCQonly->setEnabled(true);
         ui->cbAutoCQ->setEnabled(true);
         ui->cb_callB4onBand->setEnabled(true);
         ui->cb_filtering->setEnabled(true);
+        append_qso_monitor_log ("Auto Call", "Disabled.");
+        set_qso_monitor_decision ("Auto Call disabled", QString {});
     }
 
     auto_tx_mode(false);
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 void MainWindow::on_cbAutoCQ_toggled(bool b)
@@ -13052,12 +13156,17 @@ void MainWindow::on_cbAutoCQ_toggled(bool b)
         ui->txrb6->setChecked(true);
         resetAutoSwitch();
         if (!m_autoModeSwitch) clearDX();
+        append_qso_monitor_log ("Auto CQ", "Enabled. The station will call CQ automatically until the counter expires.");
+        set_qso_monitor_decision ("Auto CQ enabled", "Ready to transmit CQ on the next cycle.");
     } else {
         ui->cbAutoCall->setEnabled(true);
+        append_qso_monitor_log ("Auto CQ", "Disabled.");
+        set_qso_monitor_decision ("Auto CQ disabled", QString {});
     }
 
     auto_tx_mode(b);
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 void MainWindow::on_btn_addToIgnore_clicked( ) {
@@ -13113,6 +13222,13 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     bool matched = false;
     bool cqTargetPreferMode = (ui->cb_ignoreCQTarget->currentIndex() == 4);
     bool cqTargetPreferMatch = false;
+    auto automation_active = [this] {
+        return ui->cbAutoCall->isChecked() || ui->cbAutoCQ->isChecked() || ui->cb_autoCallNext->isChecked();
+    };
+    auto monitor_skip = [this, &automation_active, &dxCall] (QString const& reason) {
+        if (!automation_active() || dxCall.isEmpty()) return;
+        append_qso_monitor_log ("Candidate", QString {"Skipped %1: %2"}.arg (dxCall, reason));
+    };
 
     if (m_zdebug) log("callsignFiltered: ENTRY");
 
@@ -13132,11 +13248,13 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
     if (!dxCall.contains(kReDigit) || dxCall.length() < 3) {
         if (m_zdebug) log("callsignFiltered: Invalid callsign. Skipping.");
+        monitor_skip ("invalid callsign");
         return true;
     }
 
     if (dxCall.endsWith("/R")) {
         if (m_zdebug) log("callsignFiltered: False decode (ends with /R). Skipping.");
+        monitor_skip ("false decode ending with /R");
         return true;
     }
 
@@ -13149,6 +13267,7 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
               if (m_TxFirstLock && (ui->txFirstCheckBox->isChecked() != m_txFirst)) {
                 if (m_zdebug) log("callsignFiltered: TX First Lock. Pounce cancelled.");
+                monitor_skip ("TX First lock does not match the candidate");
                 return false;
               } else {
                   m_priorityCall = dxCall;
@@ -13157,6 +13276,8 @@ bool MainWindow::callsignFiltered(DecodedText dt)
                   m_prioTxFirst=(nmod!=0);
                   m_prioGrid  = dxGrid;
                   if (m_zdebug) log("callsignFiltered: Pounce mode");
+                  append_qso_monitor_log ("Pounce", QString {"Armed %1 for the next free cycle."}.arg (dxCall));
+                  set_qso_monitor_decision ("Pounce target armed", QString {"The selected station %1 is still available for a response."}.arg (dxCall));
                   return false;
               }
           }
@@ -13172,12 +13293,14 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     // LOTW only filter
     if ( ui->cb_f_LOTW->isChecked() && !m_config.lotw_users ().user (dxCall)) {
         if (m_zdebug) log("callsignFiltered: User not in LOTW");
+        monitor_skip ("not in the LoTW user list");
         return true;
     }
 
     // Ignored stations filter
     if (m_ignoredStationsCache.contains(dxCall)) {
         if (m_zdebug) log("callsignFiltered: Station is in the ignore list");
+        monitor_skip ("station is in the ignore list");
         return true;
     }
 
@@ -13186,6 +13309,7 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     QString dbM = dt.report();
     if (ui->sbMindB->value() > -30 && dbM.toInt() < ui->sbMindB->value()) {
         if (m_zdebug) log("callsignFiltered: Station signal strength under threshold: " + dbM);
+        monitor_skip (QString {"signal %1 dB is below the %2 dB threshold"}.arg (dbM, QString::number (ui->sbMindB->value ())));
         return true;
     }
 
@@ -13193,17 +13317,20 @@ bool MainWindow::callsignFiltered(DecodedText dt)
     auto const& looked_up = m_logBook.countries ()->lookup (dxCall);
     QString continent = AD1CCty::continent (looked_up.continent);
     if (m_zdebug) log("callsignFiltered: Continent filtering...");
-    if (continent == "EU" && !ui->cb_c_EU->isChecked()) return true;
-    else if (continent == "AF" && !ui->cb_c_AF->isChecked()) return true;
-    else if (continent == "AN" && !ui->cb_c_AN->isChecked()) return true;
-    else if (continent == "AS" && !ui->cb_c_AS->isChecked()) return true;
-    else if (continent == "NA" && !ui->cb_c_NA->isChecked()) return true;
-    else if (continent == "SA" && !ui->cb_c_SA->isChecked()) return true;
-    else if (continent == "OC" && !ui->cb_c_OC->isChecked()) return true;
+    if (continent == "EU" && !ui->cb_c_EU->isChecked()) { monitor_skip ("Europe is disabled by the continent filter"); return true; }
+    else if (continent == "AF" && !ui->cb_c_AF->isChecked()) { monitor_skip ("Africa is disabled by the continent filter"); return true; }
+    else if (continent == "AN" && !ui->cb_c_AN->isChecked()) { monitor_skip ("Antarctica is disabled by the continent filter"); return true; }
+    else if (continent == "AS" && !ui->cb_c_AS->isChecked()) { monitor_skip ("Asia is disabled by the continent filter"); return true; }
+    else if (continent == "NA" && !ui->cb_c_NA->isChecked()) { monitor_skip ("North America is disabled by the continent filter"); return true; }
+    else if (continent == "SA" && !ui->cb_c_SA->isChecked()) { monitor_skip ("South America is disabled by the continent filter"); return true; }
+    else if (continent == "OC" && !ui->cb_c_OC->isChecked()) { monitor_skip ("Oceania is disabled by the continent filter"); return true; }
 
     if (m_zdebug) log("callsignFiltered: CQ Target filtering...");
 
-    if (!message_words[2].startsWith("CQ") && ui->cb_ignoreCQTarget->currentIndex() == 3) return true;
+    if (!message_words[2].startsWith("CQ") && ui->cb_ignoreCQTarget->currentIndex() == 3) {
+        monitor_skip ("not a directed CQ while CQ-target-only filtering is enabled");
+        return true;
+    }
 
     if( message_words.size() > 3 && ( ui->cb_ignoreCQTarget->currentIndex() > 0 || ui->cb_filter_CQDX_Continent->currentIndex() > 0) && message_words[2].startsWith("CQ")) {
         QString w0 = message_words[1];
@@ -13463,12 +13590,14 @@ bool MainWindow::callsignFiltered(DecodedText dt)
 
     if ( !is_CQ && !(ui->cbCQonlyIncl73->isChecked() && is_73) ) {
         if (m_zdebug) log("Not CQ/73. Exiting.");
+        monitor_skip ("message is not CQ or RR73");
         return false;
     }
 
 
     if (m_TxFirstLock && (ui->txFirstCheckBox->isChecked() != m_txFirst)) {
         if (m_zdebug) log("callsignFiltered: TX First Lock. Exiting.");
+        monitor_skip ("TX First lock does not match the candidate");
         return false;
     }
 
@@ -13533,6 +13662,20 @@ bool MainWindow::callsignFiltered(DecodedText dt)
         } // #FT2-PATCHED
         m_prioTxFirst=(nmod!=0);
         m_prioGrid  = dxGrid;
+        QString priority_reason;
+        if (forcePreferPromotion) {
+            priority_reason = QString {"matched a preferred CQ target (%1)"}.arg (CQTarget);
+        } else if (ui->cb_autoCallPriority->currentIndex() == 2) {
+            priority_reason = dxGrid.length() == 4
+                ? QString {"furthest station seen this cycle at %1"}.arg (dxGrid)
+                : QString {"distance priority is enabled and this decode has no usable grid"};
+        } else if (ui->cb_autoCallPriority->currentIndex() == 1) {
+            priority_reason = QString {"strongest signal this cycle at %1 dB"}.arg (dbM);
+        } else {
+            priority_reason = "first eligible candidate this cycle";
+        }
+        append_qso_monitor_log ("Candidate", QString {"Promoted %1: %2."}.arg (dxCall, priority_reason));
+        set_qso_monitor_decision ("Priority candidate selected", QString {"%1 was chosen because it was the %2."}.arg (dxCall, priority_reason));
     }
 
 
@@ -13593,6 +13736,8 @@ void MainWindow::on_actionCall_next_triggered() {
     message.deCallAndGrid (/*out*/ dxCall, dxGrid);
 
     m_nextCall = dxCall;
+    append_qso_monitor_log ("Pounce", QString {"Manual pounce set for %1."}.arg (dxCall));
+    set_qso_monitor_decision ("Manual pounce target", QString {"Operator selected %1 for the next available response."}.arg (dxCall));
 
     m_nextRpt = message.report();
     ui->rptSpinBox->setValue(m_nextRpt.toInt());
@@ -14256,6 +14401,10 @@ void MainWindow::toggleBands() {
 
   if (newBand.isEmpty() || row < 0) return;
 
+    append_qso_monitor_log ("Band Hopper", QString {"Switching from %1 to %2 based on the current schedule row."}
+                            .arg (currentBand, newBand));
+    set_qso_monitor_decision ("Band hop", QString {"Selected %1 from the active band-hopper schedule."}.arg (newBand));
+
     ui->bandComboBox->setCurrentText (newBand);
     m_wideGraph->setRxBand (newBand);
     m_lastBand = newBand;
@@ -14269,6 +14418,7 @@ void MainWindow::toggleBands() {
 void MainWindow::switchBand(int row) {
     if (row >= 0) {
         ui->stopTxButton->click ();
+        append_qso_monitor_log ("Band", QString {"Changed to %1."}.arg (ui->bandComboBox->itemText (row)));
         ui->bandComboBox->setCurrentIndex (row);
         on_bandComboBox_activated (row);
         m_priorityCall = QString();
@@ -14315,6 +14465,9 @@ void MainWindow::on_actionAbout_WSJT_Z_triggered ()
 void MainWindow::ZProcess ()
 {
     if (m_zdebug) log("ZProcess: ENTRY");
+    if (m_ft8AutoBot && m_ft8AutoBot->enabled()) {
+        m_ft8AutoBot->onPeriodBoundary(QDateTime::currentDateTimeUtc());
+    }
     if (m_transmitting)
     {
         m_priorityCall = QString();
@@ -14345,6 +14498,9 @@ void MainWindow::ZProcess ()
             && m_lastCall != m_priorityCall && (ui->dxCallEntry->text().isEmpty() || ui->dxCallEntry->text() == m_priorityCall)) {
         tx_watchdog(false);
         if (m_zdebug) log("Next call: " + m_priorityCall);
+        append_qso_monitor_log ("Auto Call", QString {"Answering %1 on %2 Hz."}
+                                .arg (m_priorityCall, QString::number (m_prioFreq)));
+        set_qso_monitor_decision ("Answering station", QString {"Selected %1 as the current priority call."}.arg (m_priorityCall));
         m_nextCall = m_priorityCall;
         m_nextGrid = m_prioGrid;
         dxLookup(m_nextCall, m_prioGrid);
@@ -14388,7 +14544,10 @@ void MainWindow::ZProcess ()
                                     ui->txFirstCheckBox->setChecked(txf);
                             }
                             if (m_zdebug) log("ZProcess: Switched to AutoCQ");
+                            append_qso_monitor_log ("Auto Switch", "Auto Call counter expired, switching to Auto CQ.");
+                            set_qso_monitor_decision ("Switched to Auto CQ", "Auto mode switch is enabled and the Auto Call counter reached zero.");
                         } else {
+                            append_qso_monitor_log ("Auto Call", "Counter expired. Evaluating band-hopper schedule.");
                             toggleBands();
                         }
                     }
@@ -14400,8 +14559,10 @@ void MainWindow::ZProcess ()
                                 setFreeFreq();
                                 auto_tx_mode(true);
                                 m_autoTXFreq=false;
+                                append_qso_monitor_log ("Auto CQ", "Found a free transmit slot and re-armed Auto CQ.");
                             } else {
                                 auto_tx_mode(false);
+                                append_qso_monitor_log ("Auto CQ", "Waiting for another decode cycle before choosing a free transmit slot.");
                             }
                         }
                         ui->le_autoCQLeft->setText(QString::number(l-1));
@@ -14416,7 +14577,10 @@ void MainWindow::ZProcess ()
                               // AutoCQ -> AutoCall boundary.
                               if (ui->cb_bandHopper->isChecked()) toggleBands();
                               if (m_zdebug) log("ZProcess: Switched to AutoCall");
+                              append_qso_monitor_log ("Auto Switch", "Auto CQ counter expired, switching to Auto Call.");
+                              set_qso_monitor_decision ("Switched to Auto Call", "Auto mode switch is enabled and the Auto CQ counter reached zero.");
                           } else {
+                              append_qso_monitor_log ("Auto CQ", "Counter expired. Evaluating band-hopper schedule.");
                               toggleBands();
                           }
                     }
@@ -14448,7 +14612,10 @@ void MainWindow::resetAutoSwitch() {
         ui->le_autoCQLeft->setText(QString::number(ui->sb_autoCQCount->value()));
         m_priorityCall = QString();
   m_priorityCallPreferCQTarget = false;
+  append_qso_monitor_log ("Automation", QString {"Counters reset. Auto CQ=%1, Auto Call=%2"}
+                          .arg (ui->le_autoCQLeft->text (), ui->le_autoCallLeft->text ()));
   update_mode_switch_status_label ();
+  update_qso_monitor ();
 }
 
 int MainWindow::watchdog() {
@@ -14517,6 +14684,678 @@ QString MainWindow::stateLookup(QString callsign) {
     return state;
 }
 
+QString MainWindow::mode() const
+{
+    return m_mode;
+}
+
+QString MainWindow::band() const
+{
+    return m_currentBand;
+}
+
+QString MainWindow::myCall() const
+{
+    return m_config.my_callsign();
+}
+
+QString MainWindow::myGrid() const
+{
+    return m_config.my_grid();
+}
+
+QString MainWindow::dxCall() const
+{
+    return ui->dxCallEntry->text().trimmed();
+}
+
+QString MainWindow::logBookPath() const
+{
+    return m_logBook.path();
+}
+
+int MainWindow::qsoProgress() const
+{
+    return m_QSOProgress;
+}
+
+bool MainWindow::transmitting() const
+{
+    return m_transmitting;
+}
+
+bool MainWindow::autoEnabled() const
+{
+    return m_auto;
+}
+
+bool MainWindow::txFirst() const
+{
+    return ui->txFirstCheckBox->isChecked();
+}
+
+int MainWindow::trPeriodSeconds() const
+{
+    return static_cast<int>(m_TRperiod);
+}
+
+QString MainWindow::countryForCall(QString const& call) const
+{
+    return m_logBook.countries()->lookup(call).entity_name;
+}
+
+bool MainWindow::countryWorked(QString const& country, QString const& mode, QString const& band) const
+{
+    return m_logBook.country_worked(country, mode, band);
+}
+
+bool MainWindow::callWorkedGlobally(QString const& call) const
+{
+    return m_logBook.call_worked(call, QString {}, QString {});
+}
+
+bool MainWindow::callsignFiltered(DecodedText const& decoded) const
+{
+    auto nonConst = static_cast<bool (MainWindow::*)(DecodedText)>(&MainWindow::callsignFiltered);
+    return (const_cast<MainWindow *>(this)->*nonConst)(decoded);
+}
+
+bool MainWindow::tailenderCandidate(DecodedText const& decoded) const
+{
+    auto const words = decoded.messageWords();
+    if (words.size() < 3) return false;
+
+    QString hiscall;
+    QString hisgrid;
+    decoded.deCallAndGrid(hiscall, hisgrid);
+    Q_UNUSED(hisgrid);
+
+    auto const is73 = words.filter(QRegularExpression {"^(73|RR73|RRR)$"}).size();
+    return m_bCallingCQ
+        && !m_transmitting
+        && m_QSOProgress == CALLING
+        && words.at(2).contains(m_baseCall)
+        && !is73
+        && (m_config.processTailenders() || m_lastCall == hiscall);
+}
+
+QVector<int> MainWindow::busyTxBins(int hzMin, int hzMax, int stepHz, bool txFirstSlot) const
+{
+    QSet<int> bins;
+    bool const currentSlotTxFirst = txFirst();
+    for (int index = 0; index < busySlots.size(); ++index) {
+        bool const vectorTxFirst = (index % 2 == 0) ? currentSlotTxFirst : !currentSlotTxFirst;
+        if (vectorTxFirst != txFirstSlot) continue;
+        auto const& slotVector = busySlots.at(index);
+        for (auto const freq : slotVector) {
+            if (freq < hzMin || freq > hzMax) continue;
+            int const snapped = hzMin + ((freq - hzMin + stepHz / 2) / stepHz) * stepHz;
+            if (snapped >= hzMin && snapped <= hzMax) bins.insert(snapped);
+        }
+    }
+
+    QVector<int> result;
+    for (auto const bin : bins) result.append(bin);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+void MainWindow::botLog(QString const& category, QString const& detail)
+{
+    appendFT8AutoBotLog(category, detail);
+}
+
+void MainWindow::botSetDx(QString const& call, QString const& grid, int rxFreq, int txFreq,
+                          int reportDb, bool txFirstValue)
+{
+    m_nextCall = call;
+    m_nextGrid = grid;
+    m_nextRpt = QString::number(reportDb);
+    ui->rptSpinBox->setValue(reportDb);
+    ui->txFirstCheckBox->setChecked(txFirstValue);
+    ui->RxFreqSpinBox->setValue(rxFreq);
+    ui->TxFreqSpinBox->setValue(txFreq);
+    on_TxFreqSpinBox_valueChanged(ui->TxFreqSpinBox->value());
+    dxLookup(call, grid);
+    appendFT8AutoBotLog("ARM", QString {"Prepared %1 on RX %2 Hz / TX %3 Hz"}
+                        .arg(call, QString::number(rxFreq), QString::number(txFreq)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::botStartQso()
+{
+    useNextCall();
+    on_txb1_clicked();
+    appendFT8AutoBotLog("STATE", QString {"Started QSO with %1"}.arg(ui->dxCallEntry->text()));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::botEnableAutoTx(bool on)
+{
+    auto_tx_mode(on);
+}
+
+void MainWindow::botClearDx()
+{
+    clearDX();
+}
+
+void MainWindow::botStopTx()
+{
+    stopTx();
+}
+
+void MainWindow::botStartCQ()
+{
+    ui->txrb6->setChecked(true);
+    clearDX();
+    auto_tx_mode(true);
+    appendFT8AutoBotLog("CQ", "Calling CQ");
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::botSetAutoSequence(bool on)
+{
+    ui->cbAutoSeq->setChecked(on);
+}
+
+void MainWindow::botSetTxFreq(int txFreq)
+{
+    ui->TxFreqSpinBox->setValue(txFreq);
+    on_TxFreqSpinBox_valueChanged(ui->TxFreqSpinBox->value());
+}
+
+void MainWindow::captureFT8AutoBotControlSnapshot()
+{
+    m_ft8AutoBotRestoreAutoCQ = ui->cbAutoCQ->isChecked();
+    m_ft8AutoBotRestoreAutoCall = ui->cbAutoCall->isChecked();
+    m_ft8AutoBotRestoreAutoCallNext = ui->cb_autoCallNext->isChecked();
+    m_ft8AutoBotRestoreAutoSeq = ui->cbAutoSeq->isChecked();
+}
+
+void MainWindow::restoreFT8AutoBotControls()
+{
+    ui->cbAutoCQ->setEnabled(true);
+    ui->cbAutoCall->setEnabled(true);
+    ui->cb_autoCallNext->setEnabled(true);
+    ui->cbAutoCQ->setChecked(m_ft8AutoBotRestoreAutoCQ);
+    ui->cbAutoCall->setChecked(m_ft8AutoBotRestoreAutoCall);
+    ui->cb_autoCallNext->setChecked(m_ft8AutoBotRestoreAutoCallNext);
+    ui->cbAutoSeq->setChecked(m_ft8AutoBotRestoreAutoSeq);
+}
+
+void MainWindow::pauseFT8AutoBotForContextChange(QString const& reason)
+{
+    if (!m_ft8AutoBot || !m_ft8AutoBot->enabled()) return;
+    appendFT8AutoBotLog("CONFIG", reason);
+    statusBar()->showMessage(reason, 5000);
+    m_ft8AutoBot->suspend(reason);
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::disableFT8AutoBotForContextChange(QString const& reason)
+{
+    if (!m_ft8AutoBot || !m_ft8AutoBot->enabled()) return;
+    appendFT8AutoBotLog("CONFIG", reason);
+    if (m_ft8AutoBot->state() == FT8AutoBotState::InQSO
+        || m_ft8AutoBot->state() == FT8AutoBotState::AdoptingQSO) {
+        m_ft8AutoBot->failForModeChange();
+    }
+    setFT8AutoBotEnabled(false);
+}
+
+bool MainWindow::isFT8AutoBotSupportedMode(QString const& mode) const
+{
+    auto const upper = mode.trimmed().toUpper();
+    return upper == QStringLiteral("FT8") || upper == QStringLiteral("FT4");
+}
+
+void MainWindow::maybeDisableFT8AutoBotForModeChange(QString const& previousMode, QString const& nextMode)
+{
+    if (previousMode == nextMode) return;
+    if (isFT8AutoBotSupportedMode(previousMode) && isFT8AutoBotSupportedMode(nextMode)) {
+        pauseFT8AutoBotForContextChange(QStringLiteral("Bot paused for mode change %1 -> %2")
+                                        .arg(previousMode.isEmpty() ? QStringLiteral("<unset>") : previousMode,
+                                             nextMode));
+        return;
+    }
+    disableFT8AutoBotForContextChange(QStringLiteral("Bot disabled after mode change %1 -> %2")
+                                      .arg(previousMode.isEmpty() ? QStringLiteral("<unset>") : previousMode,
+                                           nextMode));
+}
+
+void MainWindow::setFT8AutoBotEnabled(bool enabled)
+{
+    if (!m_ft8AutoBot) return;
+    m_settings->setValue(QStringLiteral("ft8_autobot/enabled"), enabled);
+    if (m_ft8AutoBotToggle) {
+        QSignalBlocker blocker {m_ft8AutoBotToggle};
+        m_ft8AutoBotToggle->setChecked(enabled);
+    }
+
+    if (enabled) {
+        warnFT8AutoBotMultipleInstancesIfNeeded();
+        captureFT8AutoBotControlSnapshot();
+        ui->cbAutoCQ->setChecked(false);
+        ui->cbAutoCall->setChecked(false);
+        ui->cb_autoCallNext->setChecked(false);
+        ui->cbAutoCQ->setEnabled(false);
+        ui->cbAutoCall->setEnabled(false);
+        ui->cb_autoCallNext->setEnabled(false);
+        ui->cbAutoSeq->setChecked(true);
+        m_ft8AutoBot->setEnabled(true);
+        m_ft8AutoBotSafetyTimer.start(2 * 60 * 60 * 1000);
+        appendFT8AutoBotLog("SAFETY", QStringLiteral("Safety timeout started duration_min=120"));
+    } else {
+        m_ft8AutoBotSafetyTimer.stop();
+        auto_tx_mode(false);
+        m_ft8AutoBot->setEnabled(false);
+        restoreFT8AutoBotControls();
+    }
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotMode(FT8AutoBotMode modeValue)
+{
+    if (!m_ft8AutoBot) return;
+    m_ft8AutoBot->setMode(modeValue);
+    m_settings->setValue(QStringLiteral("ft8_autobot/mode"), static_cast<int>(modeValue));
+    appendFT8AutoBotLog("CONFIG", QString {"Mode set to %1"}
+                        .arg(modeValue == FT8AutoBotMode::CQ ? "CQ" : "Search & Pounce"));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotReuseFilters(bool enabled)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.reuseMainWindowFilters = enabled;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("Reuse main filters %1").arg(enabled ? "on" : "off"));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotMinScore(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.minScore = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("minScore=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotCqIdleAfter(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.cqIdleAfter = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("cqIdleAfter=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotIdleListenSeconds(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.idleListenSeconds = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("idleListenSeconds=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotStuckCycleLimit(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.stuckCycleLimit = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("stuckCycleLimit=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotStudyAfterCycles(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.studyAfterCycles = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("studyAfterCycles=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotAcceptRr73AsCq(bool enabled)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.acceptRr73AsCq = enabled;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("acceptRr73AsCq=%1").arg(enabled ? "on" : "off"));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotWakeDuringIdle(bool enabled)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.wakeDuringIdleInCQMode = enabled;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("wakeDuringIdle=%1").arg(enabled ? "on" : "off"));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotIdleTxPlanMin(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.idleTxPlanMinHz = qMin(value, settings.idleTxPlanMaxHz);
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("idleTxPlanMinHz=%1").arg(QString::number(settings.idleTxPlanMinHz)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotIdleTxPlanMax(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.idleTxPlanMaxHz = qMax(value, settings.idleTxPlanMinHz);
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("idleTxPlanMaxHz=%1").arg(QString::number(settings.idleTxPlanMaxHz)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotIdleTxPlanStep(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.idleTxPlanStepHz = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("idleTxPlanStepHz=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotAdoptionGracePeriods(int value)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.adoptionGracePeriods = value;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("adoptionGracePeriods=%1").arg(QString::number(value)));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::setFT8AutoBotLogToFile(bool enabled)
+{
+    if (!m_ft8AutoBot) return;
+    auto settings = m_ft8AutoBot->settings();
+    settings.logToFile = enabled;
+    m_ft8AutoBot->setSettings(settings);
+    saveFT8AutoBotSettings();
+    appendFT8AutoBotLog("CONFIG", QStringLiteral("logToFile=%1").arg(enabled ? "on" : "off"));
+    updateFT8AutoBotWindow();
+}
+
+void MainWindow::appendFT8AutoBotLog(QString const& category, QString const& detail)
+{
+    if (detail.isEmpty()) return;
+    auto const entry = QString {"[%1] %2: %3"}
+        .arg(QDateTime::currentDateTime().toString("hh:mm:ss"), category, detail);
+    if (!m_ft8AutoBotEntries.isEmpty() && m_ft8AutoBotEntries.back() == entry) return;
+    m_ft8AutoBotEntries.append(entry);
+    while (m_ft8AutoBotEntries.size() > 1000) m_ft8AutoBotEntries.removeFirst();
+    writeFT8AutoBotLogEntry(category, detail);
+    if (m_ft8AutoBotView) m_ft8AutoBotView->appendDecisionLog(entry);
+}
+
+QString MainWindow::ft8AutoBotLogFilePath(QDate const& date) const
+{
+    QDir logDir {m_config.writeable_data_dir().absoluteFilePath("logs")};
+    return logDir.absoluteFilePath(QStringLiteral("ft8_autobot_%1.log").arg(date.toString("yyyyMMdd")));
+}
+
+void MainWindow::pruneFT8AutoBotLogFiles(QDir& logDir, QDate const& today)
+{
+    int const retentionDays = qMax(1, m_settings->value(QStringLiteral("ft8_autobot/log_retention_days"), 30).toInt());
+    auto const entries = logDir.entryList(QStringList {} << QStringLiteral("ft8_autobot_*.log"),
+                                          QDir::Files, QDir::Name);
+    for (auto const& name : entries) {
+        auto const stamp = name.mid(QStringLiteral("ft8_autobot_").size(), 8);
+        auto const fileDate = QDate::fromString(stamp, QStringLiteral("yyyyMMdd"));
+        if (!fileDate.isValid()) continue;
+        if (fileDate.daysTo(today) <= retentionDays) continue;
+        logDir.remove(name);
+    }
+}
+
+bool MainWindow::confirmFT8AutoBotMemoryClear(QString const& title, QString const& text)
+{
+    return MessageBox::Yes == MessageBox::query_message(this, title, text, QString {},
+                                                        MessageBox::Yes | MessageBox::Cancel,
+                                                        MessageBox::Cancel);
+}
+
+void MainWindow::warnFT8AutoBotMultipleInstancesIfNeeded()
+{
+    if (m_ft8AutoBotMultipleInstanceWarned || !m_multiple) return;
+    m_ft8AutoBotMultipleInstanceWarned = true;
+    MessageBox::warning_message(this,
+                                tr("FT8 Auto Bot Shared Data Warning"),
+                                tr("Multiple WSJT-Z instances are running. FT8 Auto Bot memory files and logs are shared per writable data directory."),
+                                tr("Worked and cooldown files live under:\n%1")
+                                .arg(m_config.writeable_data_dir().absolutePath()),
+                                MessageBox::Ok,
+                                MessageBox::Ok);
+}
+
+void MainWindow::writeFT8AutoBotLogEntry(QString const& category, QString const& detail)
+{
+    if (!m_ft8AutoBot || !m_ft8AutoBot->settings().logToFile) {
+        return;
+    }
+
+    auto const nowUtc = QDateTime::currentDateTimeUtc();
+    auto const dateKey = nowUtc.date().toString("yyyyMMdd");
+    QDir logDir {m_config.writeable_data_dir().absoluteFilePath("logs")};
+    if (!logDir.exists() && !logDir.mkpath(".")) {
+        return;
+    }
+
+    QFile file {ft8AutoBotLogFilePath(nowUtc.date())};
+    bool const newDay = (m_ft8AutoBotLogDate != dateKey);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+
+    QTextStream stream {&file};
+    if (newDay && file.size() == 0) {
+        stream << "# FT8 Auto Bot log\n";
+        stream << "# utc\tcategory\tdetail\n";
+        m_ft8AutoBotLogDate = dateKey;
+        pruneFT8AutoBotLogFiles(logDir, nowUtc.date());
+    } else if (newDay) {
+        m_ft8AutoBotLogDate = dateKey;
+        pruneFT8AutoBotLogFiles(logDir, nowUtc.date());
+    }
+    stream << nowUtc.toString(Qt::ISODate) << '\t' << category << '\t' << detail << '\n';
+}
+
+FT8AutoBotSettings MainWindow::loadFT8AutoBotSettings() const
+{
+    FT8AutoBotSettings settings;
+    settings.reuseMainWindowFilters = m_settings->value(QStringLiteral("ft8_autobot/reuse_main_filters"), true).toBool();
+    settings.minScore = m_settings->value(QStringLiteral("ft8_autobot/min_score"), 1000).toInt();
+    settings.idleListenSeconds = m_settings->value(QStringLiteral("ft8_autobot/idle_listen_sec"), 120).toInt();
+    settings.cqIdleAfter = m_settings->value(QStringLiteral("ft8_autobot/cq_idle_after"), 10).toInt();
+    settings.cooldownMinutes = m_settings->value(QStringLiteral("ft8_autobot/cooldown_minutes"), 30).toInt();
+    settings.stuckCycleLimit = m_settings->value(QStringLiteral("ft8_autobot/stuck_cycle_limit"), 3).toInt();
+    settings.studyAfterCycles = m_settings->value(QStringLiteral("ft8_autobot/study_after_cycles"), 12).toInt();
+    settings.acceptRr73AsCq = m_settings->value(QStringLiteral("ft8_autobot/accept_rr73_as_cq"), false).toBool();
+    settings.wakeDuringIdleInCQMode = m_settings->value(QStringLiteral("ft8_autobot/wake_during_idle_cq"), true).toBool();
+    settings.idleTxPlanMinHz = m_settings->value(QStringLiteral("ft8_autobot/idle_tx_plan_min_hz"), 1000).toInt();
+    settings.idleTxPlanMaxHz = m_settings->value(QStringLiteral("ft8_autobot/idle_tx_plan_max_hz"), 2400).toInt();
+    settings.idleTxPlanStepHz = m_settings->value(QStringLiteral("ft8_autobot/idle_tx_plan_step_hz"), 50).toInt();
+    settings.adoptionGracePeriods = m_settings->value(QStringLiteral("ft8_autobot/adoption_grace_periods"), 2).toInt();
+    settings.logToFile = m_settings->value(QStringLiteral("ft8_autobot/log_to_file"), true).toBool();
+    return settings;
+}
+
+void MainWindow::saveFT8AutoBotSettings()
+{
+    if (!m_ft8AutoBot) return;
+    auto const settings = m_ft8AutoBot->settings();
+    m_settings->setValue(QStringLiteral("ft8_autobot/reuse_main_filters"), settings.reuseMainWindowFilters);
+    m_settings->setValue(QStringLiteral("ft8_autobot/min_score"), settings.minScore);
+    m_settings->setValue(QStringLiteral("ft8_autobot/idle_listen_sec"), settings.idleListenSeconds);
+    m_settings->setValue(QStringLiteral("ft8_autobot/cq_idle_after"), settings.cqIdleAfter);
+    m_settings->setValue(QStringLiteral("ft8_autobot/cooldown_minutes"), settings.cooldownMinutes);
+    m_settings->setValue(QStringLiteral("ft8_autobot/stuck_cycle_limit"), settings.stuckCycleLimit);
+    m_settings->setValue(QStringLiteral("ft8_autobot/study_after_cycles"), settings.studyAfterCycles);
+    m_settings->setValue(QStringLiteral("ft8_autobot/accept_rr73_as_cq"), settings.acceptRr73AsCq);
+    m_settings->setValue(QStringLiteral("ft8_autobot/wake_during_idle_cq"), settings.wakeDuringIdleInCQMode);
+    m_settings->setValue(QStringLiteral("ft8_autobot/idle_tx_plan_min_hz"), settings.idleTxPlanMinHz);
+    m_settings->setValue(QStringLiteral("ft8_autobot/idle_tx_plan_max_hz"), settings.idleTxPlanMaxHz);
+    m_settings->setValue(QStringLiteral("ft8_autobot/idle_tx_plan_step_hz"), settings.idleTxPlanStepHz);
+    m_settings->setValue(QStringLiteral("ft8_autobot/adoption_grace_periods"), settings.adoptionGracePeriods);
+    m_settings->setValue(QStringLiteral("ft8_autobot/log_to_file"), settings.logToFile);
+}
+
+void MainWindow::showFT8AutoBotWindow()
+{
+    if (!m_ft8AutoBotView) {
+        m_ft8AutoBotView.reset(new FT8AutoBotWindow {});
+        m_ft8AutoBotView->restoreGeometry(m_ft8AutoBotViewGeometry);
+        connect(this, &MainWindow::finished, m_ft8AutoBotView.data(), &FT8AutoBotWindow::close);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::enableRequested,
+                this, &MainWindow::setFT8AutoBotEnabled);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::modeRequested,
+                this, &MainWindow::setFT8AutoBotMode);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::reuseFiltersRequested,
+                this, &MainWindow::setFT8AutoBotReuseFilters);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::minScoreRequested,
+                this, &MainWindow::setFT8AutoBotMinScore);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::cqIdleAfterRequested,
+                this, &MainWindow::setFT8AutoBotCqIdleAfter);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::idleListenSecondsRequested,
+                this, &MainWindow::setFT8AutoBotIdleListenSeconds);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::stuckCycleLimitRequested,
+                this, &MainWindow::setFT8AutoBotStuckCycleLimit);
+        connect(m_ft8AutoBotView->studyAfterCyclesControl(), QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &MainWindow::setFT8AutoBotStudyAfterCycles);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::acceptRr73AsCqRequested,
+                this, &MainWindow::setFT8AutoBotAcceptRr73AsCq);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::wakeDuringIdleRequested,
+                this, &MainWindow::setFT8AutoBotWakeDuringIdle);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::idleTxPlanMinRequested,
+                this, &MainWindow::setFT8AutoBotIdleTxPlanMin);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::idleTxPlanMaxRequested,
+                this, &MainWindow::setFT8AutoBotIdleTxPlanMax);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::idleTxPlanStepRequested,
+                this, &MainWindow::setFT8AutoBotIdleTxPlanStep);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::adoptionGracePeriodsRequested,
+                this, &MainWindow::setFT8AutoBotAdoptionGracePeriods);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::logToFileRequested,
+                this, &MainWindow::setFT8AutoBotLogToFile);
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::clearLogRequested, this, [this] {
+            m_ft8AutoBotEntries.clear();
+            if (m_ft8AutoBotView) m_ft8AutoBotView->setDecisionLog(m_ft8AutoBotEntries);
+        });
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::copyLogRequested, this, [this] {
+            auto text = m_ft8AutoBotView ? m_ft8AutoBotView->selectedDecisionLogText() : QString {};
+            if (text.isEmpty()) {
+                text = m_ft8AutoBotEntries.join('\n');
+            }
+            QGuiApplication::clipboard()->setText(text);
+        });
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::openLogRequested, this, [this] {
+            auto const path = ft8AutoBotLogFilePath(QDate::currentDate());
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+        });
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::clearWorkedRequested, this, [this] {
+            if (!m_ft8AutoBot) return;
+            if (!confirmFT8AutoBotMemoryClear(tr("Clear Worked Memory"),
+                                              tr("Clear the FT8 Auto Bot worked callsign memory?\n\nThis allows previously blocked callsigns to be called again."))) {
+                return;
+            }
+            if (m_ft8AutoBot->memory().clearWorked()) {
+                appendFT8AutoBotLog("WORKED", "Cleared worked file");
+                updateFT8AutoBotWindow();
+            }
+        });
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::clearCooldownRequested, this, [this] {
+            if (!m_ft8AutoBot) return;
+            if (!confirmFT8AutoBotMemoryClear(tr("Clear Cooldown List"),
+                                              tr("Clear the FT8 Auto Bot cooldown list?\n\nThis immediately makes recently abandoned stations eligible again."))) {
+                return;
+            }
+            if (m_ft8AutoBot->memory().clearCooldowns()) {
+                appendFT8AutoBotLog("COOLDOWN", "Cleared cooldown list");
+                updateFT8AutoBotWindow();
+            }
+        });
+        connect(m_ft8AutoBotView.data(), &FT8AutoBotWindow::windowVisibleChanged, this, [this] (bool visible) {
+            if (m_ft8AutoBotAction) {
+                QSignalBlocker blocker {m_ft8AutoBotAction};
+                m_ft8AutoBotAction->setChecked(visible);
+            }
+            if (!visible && m_ft8AutoBotView) {
+                m_ft8AutoBotViewGeometry = m_ft8AutoBotView->saveGeometry();
+                m_settings->setValue(QStringLiteral("ft8_autobot/geometry"), m_ft8AutoBotViewGeometry);
+                m_settings->setValue(QStringLiteral("ft8_autobot_geometry"), m_ft8AutoBotViewGeometry);
+            }
+        });
+    }
+
+    updateFT8AutoBotWindow();
+    m_ft8AutoBotView->setDecisionLog(m_ft8AutoBotEntries);
+    m_ft8AutoBotView->showNormal();
+    m_ft8AutoBotView->raise();
+    m_ft8AutoBotView->activateWindow();
+}
+
+void MainWindow::onFT8AutoBotActionToggled(bool checked)
+{
+    if (!checked) {
+        if (m_ft8AutoBotView) m_ft8AutoBotView->hide();
+        return;
+    }
+    showFT8AutoBotWindow();
+}
+
+void MainWindow::updateFT8AutoBotWindow()
+{
+    if (!m_ft8AutoBot) return;
+    if (m_ft8AutoBotToggle) {
+        QSignalBlocker blocker {m_ft8AutoBotToggle};
+        m_ft8AutoBotToggle->setChecked(m_ft8AutoBot->enabled());
+    }
+    if (!m_ft8AutoBotView) return;
+    auto const nextExpiryUtc = m_ft8AutoBot->memory().nextCooldownExpiry();
+    m_ft8AutoBotView->setSnapshot(m_ft8AutoBot->snapshot());
+    m_ft8AutoBotView->setSettings(m_ft8AutoBot->settings());
+    m_ft8AutoBotView->setMemoryInfo(m_ft8AutoBot->memory().workedCount(),
+                                    m_ft8AutoBot->memory().cooldownCount(),
+                                    nextExpiryUtc.isValid() ? nextExpiryUtc.toLocalTime().toString("hh:mm:ss") : QString {});
+    m_ft8AutoBotView->setRuntimeInfo(qso_progress_text(),
+                                     QString::number(m_ft8AutoBot->counters().activeQsoCycles),
+                                     autoEnabled() ? tr("On") : tr("Off"),
+                                     ui->cbAutoSeq->isChecked() ? tr("On") : tr("Off"));
+    m_ft8AutoBotView->setCounters(m_ft8AutoBot->counters());
+    m_ft8AutoBotView->setLastDecision(m_ft8AutoBot->lastDecision());
+}
+
 void MainWindow::on_actionUnfiltered_View_triggered() {
     if (m_unfilteredView && m_unfilteredView->isVisible()) {
         m_unfilteredView->hide();
@@ -14564,6 +15403,173 @@ void MainWindow::on_actionPSKReporter_triggered() {
         m_pskReporterView->activateWindow ();
 
         connect(m_pskReporterView.data(), &PSKReporterWidget::clicked, this, &MainWindow::pskTableClicked);
+    }
+}
+
+void MainWindow::on_actionQSO_Monitor_triggered ()
+{
+    if (!ui->actionQSO_Monitor->isChecked()) {
+        if (m_qsoMonitorView) m_qsoMonitorView->hide ();
+        return;
+    }
+
+    if (!m_qsoMonitorView) {
+        m_qsoMonitorView.reset (new QSOMonitorWindow {});
+        m_qsoMonitorView->restoreGeometry (m_qsoMonitorViewGeometry);
+        connect (this, &MainWindow::finished, m_qsoMonitorView.data (), &QSOMonitorWindow::close);
+        connect (m_qsoMonitorView.data (), &QSOMonitorWindow::clear_log_requested, this, &MainWindow::clear_qso_monitor_log);
+        connect (m_qsoMonitorView.data (), &QSOMonitorWindow::window_visible_changed, this, [this] (bool visible) {
+            ui->actionQSO_Monitor->setChecked (visible);
+            if (!visible && m_qsoMonitorView) {
+                m_qsoMonitorViewGeometry = m_qsoMonitorView->saveGeometry ();
+            }
+            if (visible && m_qsoMonitorView) {
+                update_qso_monitor ();
+                m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
+            }
+        });
+    }
+
+    update_qso_monitor ();
+    m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
+    m_qsoMonitorView->setFont (m_config.decoded_text_font ());
+    m_qsoMonitorView->showNormal ();
+    m_qsoMonitorView->raise ();
+    m_qsoMonitorView->activateWindow ();
+}
+
+QString MainWindow::qso_progress_text () const
+{
+    switch (m_QSOProgress) {
+    case CALLING: return tr ("Calling / Idle");
+    case REPLYING: return tr ("Replying");
+    case REPORT: return tr ("Sending Report");
+    case ROGER_REPORT: return tr ("Sending RRR / RR73");
+    case ROGERS: return tr ("Sending 73");
+    case SIGNOFF: return tr ("Signoff");
+    default: return tr ("Unknown");
+    }
+}
+
+void MainWindow::update_qso_monitor_station_cache (QString const& call, QString const& grid)
+{
+    if (m_qsoMonitorStation.call == call && m_qsoMonitorStation.grid == grid) return;
+
+    m_qsoMonitorStation = {};
+    m_qsoMonitorStation.call = call;
+    m_qsoMonitorStation.grid = grid;
+
+    if (call.isEmpty ()) return;
+
+    auto const& looked_up = m_logBook.countries ()->lookup (call);
+    QString continent = AD1CCty::continent (looked_up.continent);
+    continent.replace ("AF", "Africa");
+    continent.replace ("AN", "Antarctica");
+    continent.replace ("AS", "Asia");
+    continent.replace ("EU", "Europe");
+    continent.replace ("NA", "N. America");
+    continent.replace ("OC", "Oceania");
+    continent.replace ("SA", "S. America");
+    continent.replace ("UN", "N/A");
+
+    m_qsoMonitorStation.country = looked_up.entity_name;
+    m_qsoMonitorStation.continent = continent;
+    m_qsoMonitorStation.cq_zone = QString::number (looked_up.CQ_zone);
+    m_qsoMonitorStation.itu_zone = QString::number (looked_up.ITU_zone);
+
+    if (looked_up.entity_name == "United States") {
+        m_qsoMonitorStation.state = stateLookup (call);
+    }
+
+    if (grid.length () >= 4) {
+        qint64 nsec = (QDateTime::currentMSecsSinceEpoch () / 1000) % 86400;
+        double utch = nsec / 3600.0;
+        int nAz;
+        int nEl;
+        int nDmiles;
+        int nDkm;
+        int nHotAz;
+        int nHotABetter;
+        azdist_ (const_cast<char *> ((m_config.my_grid () + "      ").left (6).toLatin1 ().constData ()),
+                 const_cast<char *> ((grid + "      ").left (6).toLatin1 ().constData ()), &utch,
+                 &nAz, &nEl, &nDmiles, &nDkm, &nHotAz, &nHotABetter, 6, 6);
+        int nd = m_config.miles () ? nDmiles : nDkm;
+        m_qsoMonitorStation.distance = QString::number (nd) + (m_config.miles () ? " mi" : " km");
+        m_qsoMonitorStation.bearing = QString::number (nAz);
+    }
+}
+
+void MainWindow::update_qso_monitor ()
+{
+    QString call = ui->dxCallEntry->text ().trimmed ();
+    QString grid = ui->dxGridEntry->text ().trimmed ();
+
+    if (call.isEmpty ()) call = m_hisCall.trimmed ();
+    if (grid.isEmpty ()) grid = m_hisGrid.trimmed ();
+
+    update_qso_monitor_station_cache (call, grid);
+
+    QString auto_cq = ui->cbAutoCQ->isChecked ()
+        ? tr ("On (%1 left of %2)").arg (ui->le_autoCQLeft->text (), QString::number (ui->sb_autoCQCount->value ()))
+        : tr ("Off");
+    QString auto_call = ui->cbAutoCall->isChecked ()
+        ? tr ("On (%1 left of %2)").arg (ui->le_autoCallLeft->text (), QString::number (ui->sb_autoCallCount->value ()))
+        : tr ("Off");
+    if (ui->cb_autoCallNext->isChecked ()) {
+        auto_call += tr (" | Pounce armed");
+    }
+
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->set_station_info (qso_progress_text ()
+                                            , m_qsoMonitorStation.call
+                                            , m_qsoMonitorStation.grid
+                                            , m_qsoMonitorStation.distance
+                                            , m_qsoMonitorStation.bearing
+                                            , m_qsoMonitorStation.country
+                                            , m_qsoMonitorStation.continent
+                                            , m_qsoMonitorStation.cq_zone
+                                            , m_qsoMonitorStation.itu_zone
+                                            , m_qsoMonitorStation.state);
+        m_qsoMonitorView->set_auto_info (auto_cq
+                                         , auto_call
+                                         , m_priorityCall
+                                         , m_qsoMonitorLastAction
+                                         , m_qsoMonitorLastReason);
+    }
+}
+
+void MainWindow::append_qso_monitor_log (QString const& category, QString const& detail)
+{
+    if (detail.isEmpty ()) return;
+
+    auto const entry = QString {"[%1] %2: %3"}
+        .arg (QDateTime::currentDateTime ().toString ("hh:mm:ss"), category, detail);
+    if (entry == m_qsoMonitorLastEntry) return;
+
+    m_qsoMonitorLastEntry = entry;
+    m_qsoMonitorEntries.append (entry);
+    while (m_qsoMonitorEntries.size () > 250) {
+        m_qsoMonitorEntries.removeFirst ();
+    }
+
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->append_decision_log (entry);
+    }
+}
+
+void MainWindow::set_qso_monitor_decision (QString const& action, QString const& reason)
+{
+    m_qsoMonitorLastAction = action;
+    m_qsoMonitorLastReason = reason;
+    update_qso_monitor ();
+}
+
+void MainWindow::clear_qso_monitor_log ()
+{
+    m_qsoMonitorEntries.clear ();
+    m_qsoMonitorLastEntry.clear ();
+    if (m_qsoMonitorView) {
+        m_qsoMonitorView->set_decision_log (m_qsoMonitorEntries);
     }
 }
 
@@ -14676,6 +15682,10 @@ bool MainWindow::setFreeFreq() {
 
     if(newTxFreq != 0) {
         if (m_zdebug) log("Free: " + QString::number(newTxFreq));
+        append_qso_monitor_log ("Auto CQ", QString {"Moved transmit frequency to %1 Hz after checking busy slots."}
+                                .arg (QString::number (newTxFreq)));
+        set_qso_monitor_decision ("Transmit slot updated", QString {"Selected %1 Hz because it was clear in the recent decode windows."}
+                                  .arg (QString::number (newTxFreq)));
         ui->TxFreqSpinBox->setValue(newTxFreq);
         on_TxFreqSpinBox_valueChanged (ui->TxFreqSpinBox->value ());
         return true;
@@ -14718,5 +15728,3 @@ void MainWindow::execCmd(QString cmd) {
     cmd.remove(0, cmd.indexOf(" ")+1);
     QProcess::startDetached(program, QStringList() << cmd);
 }
-
-

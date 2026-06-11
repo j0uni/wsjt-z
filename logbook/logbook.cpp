@@ -69,6 +69,18 @@ void LogBook::rescan ()
   worked_before_.reload ();
 }
 
+bool LogBook::country_worked(QString const& country, QString const& mode, QString const& band) const
+{
+  auto const& mode_to_check = (config_ && !config_->highlight_by_mode ()) ? QString {} : mode;
+  return worked_before_.country_worked(country, mode_to_check, band);
+}
+
+bool LogBook::call_worked(QString const& call, QString const& mode, QString const& band) const
+{
+  auto const& mode_to_check = (config_ && !config_->highlight_by_mode ()) ? QString {} : mode;
+  return worked_before_.call_worked(call, mode_to_check, band);
+}
+
 QString const LogBook::cty_version() const
 {
   return worked_before_.cty_version();

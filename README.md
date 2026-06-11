@@ -20,6 +20,14 @@ WSJT-Z is a fork of [WSJT-X](https://wsjt.sourceforge.io/wsjtx.html) by **Joe Ta
 
 WSJT-Z supports **FT8**, **FT4**, **FT2**, **JT4 / JT9 / JT65**, **Q65**, **MSK144**, **WSPR**, **Echo** and **FreqCal**.
 
+## New In This WSJT-Z Build
+
+This branch includes additional WSJT-Z workflow features on top of the base project, including:
+
+- **FT8 Auto Bot** — bot-owned FT8/FT4 Search & Pounce or CQ operation with score-based target selection, worked-memory tracking, cooldown after failed QSOs, idle back-off, stuck/QRM detection, and waterfall-based TX slot planning
+- **QSO Monitor window** — a dedicated window for following automation decisions, current target, auto modes, and station context while operating
+- **FT8 Auto Bot window** — a dedicated control/monitor panel with live state, counters, target details, planned TX frequency, worked/cooldown memory, and a rolling decision log
+
 > ⚠️ **Always monitor your transceiver while using WSJT-Z**, unless unattended/automated operation is explicitly permitted by the regulations in your country.
 
 ---
@@ -36,6 +44,10 @@ Pre-built Windows installers and release notes are published on the GitHub **Rel
 
   → **https://github.com/sq9fve/wsjt-z/releases**
 
+## Building from source (Linux)
+
+See **[BUILD.md](BUILD.md)** for dependencies, CMake options, standard and no-`sudo` builds, and troubleshooting.
+
 ## Features
 
 ### Operating workflow
@@ -45,6 +57,7 @@ Pre-built Windows installers and release notes are published on the GitHub **Rel
 - **Priority call queue** — promote callsigns of interest to the front of the call list
 - **Auto Call Next** — chain QSOs without operator intervention
 - **Band-hopper** — schedule automatic band changes by time-of-day or activity
+- **FT8 Auto Bot** — bot-owned FT8/FT4 Search & Pounce or CQ operation with score-based target selection, worked-memory tracking, cooldown after failed QSOs, idle back-off, stuck/QRM detection, and waterfall-based TX slot planning
 
 ### Filtering & highlighting
 - **Ignored stations list** — silence specific calls or prefixes
@@ -61,6 +74,8 @@ Pre-built Windows installers and release notes are published on the GitHub **Rel
 - **Performance work in the C++ hot path** — cached filter lists, reduced regex compilation, gated debug logging, tuned Fortran release flags
 
 ### Integration & UX
+- **QSO Monitor window** — dedicated visibility into automation decisions, current target, auto modes, and station context
+- **FT8 Auto Bot window** — dedicated monitor/control panel with live state, counters, target details, planned TX frequency, worked/cooldown memory, and rolling decision log
 - **QRZ.com lookup panel** — name, address, grid, biography
 - **Audio alerts** — configurable per-event sounds
 - **PSK Reporter integration**

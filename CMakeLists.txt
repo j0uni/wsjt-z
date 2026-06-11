@@ -219,6 +219,10 @@ set (wsjt_qt_CXXSRCS
   Network/NetworkMessage.cpp
   Network/MessageClient.cpp
   widgets/LettersSpinBox.cpp
+  widgets/FT8AutoBot.cpp
+  widgets/FT8AutoBotMemory.cpp
+  widgets/FT8AutoBotWindow.cpp
+  widgets/QSOMonitorWindow.cpp
   widgets/HintedSpinBox.cpp
   widgets/RestrictedSpinBox.cpp
   widgets/HelpTextWindow.cpp
@@ -867,25 +871,10 @@ set (PALETTE_FILES
 )
 
 if (APPLE)
-  set (WSJTX_ICON_FILE ${CMAKE_PROJECT_NAME}.icns)
-  set (ICONSRCS
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_16x16.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_16x16@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_32x32.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_32x32@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_256x256.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_256x256@2x.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_512x512.png
-    icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_512x512@2x.png
-    )
-  add_custom_command (
-    OUTPUT ${WSJTX_ICON_FILE}
-    COMMAND iconutil -c icns --output "${CMAKE_BINARY_DIR}/${WSJTX_ICON_FILE}" "${CMAKE_SOURCE_DIR}/icons/Darwin/${CMAKE_PROJECT_NAME}.iconset"
-    DEPENDS ${ICONSRCS}
-    COMMENT "Building Icons"
-    )
+  # iconutil rejects the checked-in iconset on some newer macOS setups even
+  # though the PNGs are present and dimensionally correct. Use the bundled PNG
+  # directly so local builds still produce a runnable app bundle.
+  set (WSJTX_ICON_FILE icons/Darwin/${CMAKE_PROJECT_NAME}.iconset/icon_128x128.png)
 else ()
   set (WSJTX_ICON_FILE icons/windows-icons/wsjtx.ico)
 endif (APPLE)
@@ -1596,6 +1585,19 @@ add_executable (wsjtx MACOSX_BUNDLE
 if (WSJT_CREATE_WINMAIN)
   set_target_properties (wsjtx PROPERTIES WIN32_EXECUTABLE ON)
 endif (WSJT_CREATE_WINMAIN)
+
+# jt9 opens ALLCALL7.TXT from its working directory (same folder as wsjtx/jt9).
+# install() handles release layouts; this keeps in-tree "cmake --build" runs working.
+foreach (_runtime_data_target IN ITEMS wsjtx jt9)
+  if (TARGET ${_runtime_data_target})
+    add_custom_command (TARGET ${_runtime_data_target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/ALLCALL7.TXT"
+        "$<TARGET_FILE_DIR:${_runtime_data_target}>/ALLCALL7.TXT"
+      COMMENT "Copy ALLCALL7.TXT next to ${_runtime_data_target} for decoder"
+      )
+  endif ()
+endforeach ()
 
 set_target_properties (wsjtx PROPERTIES
   MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Darwin/Info.plist.in"

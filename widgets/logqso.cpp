@@ -163,19 +163,11 @@ void LogQSO::initLogQSO(QString const& hisCall, QString const& hisGrid, QString 
       ui->comboBoxPropMode->setCurrentIndex (-1);
     }
 
-  using SpOp = Configuration::SpecialOperatingActivity;
-  auto special_op = m_config->special_op_id ();
-  if (SpOp::FOX == special_op
-      || (m_config->autoLog ()
-          && ((SpOp::NONE < special_op && special_op < SpOp::FOX) || SpOp::ARRL_DIGI == special_op)))
-    {
-      // allow auto logging in Fox mode and contests
-      accept();
-    }
-  else
-    {
-      show();
-    }
+  // Always complete the logging pipeline immediately once the app has enough
+  // QSO data to initialize this dialog. The dialog is still populated so the
+  // same validation and file-writing path is reused, but normal FT8/FT4 QSOs
+  // no longer depend on a prompt/confirm step.
+  accept();
 }
 
 void LogQSO::accept()

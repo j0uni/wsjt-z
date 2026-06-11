@@ -459,6 +459,8 @@ void DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
                                      bool haveFSpread, float fSpread, bool bDisplayPoints, int points,
                                      bool incl73, bool colourAll, QString distance, QString state, bool filtered)
 {
+  Q_UNUSED(displayDXCCEntity);
+  Q_UNUSED(colourAll);
   m_points=points;
   m_bDisplayPoints=bDisplayPoints;
   m_bPrincipalPrefix=ppfx;
@@ -513,12 +515,14 @@ void DisplayText::displayDecodedText(DecodedText const& decodedText, QString con
       message = message.left (ap_pos).trimmed ();
     }
   m_CQPriority="";
-  if (CQcall || colourAll ||  (is_73 && (m_config->highlight_73 ())))
+  bool const alwaysDisplayDxInfo = true;
+  bool const annotateAllMessages = true;
+  if (CQcall || annotateAllMessages || (is_73 && (m_config->highlight_73 ())))
     {
-      if (displayDXCCEntity)
+      if (alwaysDisplayDxInfo)
         {
-          // if enabled add the DXCC entity and B4 status to the end of the
-          // preformated text line t1
+          // Always append DXCC/worked-before information so every decoded row
+          // carries the same context instead of depending on optional toggles.
           auto currentMode = mode;
           message = appendWorkedB4 (message, dxCall, dxGrid, &bg, &fg
                                     , logBook, currentBand, currentMode, extra);

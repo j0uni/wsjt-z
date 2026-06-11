@@ -4745,6 +4745,7 @@ list. The list can be maintained in Settings (F2).</string>
     <addaction name="separator"/>
     <addaction name="cbDockWF"/>
     <addaction name="actionCall_info"/>
+    <addaction name="actionQSO_Monitor"/>
     <addaction name="actionDark_mode"/>
     <addaction name="separator"/>
     <addaction name="actionUnfiltered_View"/>
@@ -5464,6 +5465,14 @@ list. The list can be maintained in Settings (F2).</string>
    </property>
    <property name="text">
     <string>Call info</string>
+   </property>
+  </action>
+  <action name="actionQSO_Monitor">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>QSO Monitor</string>
    </property>
   </action>
   <action name="actionWSJT_Z_Debug">

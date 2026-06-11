@@ -17,6 +17,14 @@ jnq*
 __pycache__
 cmake-build-debug
 cmake-build-release
+build/
+build-*/
+stage/
+stage-*/
+.DS_Store
+.AppleDouble
+.deps/
+.sysroot/
 CMakeFiles
 fnd
 lib/77bit/tmp
