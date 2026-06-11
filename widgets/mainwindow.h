@@ -901,6 +901,7 @@ private:
   QTimer minuteTimer;
   QTimer splashTimer;
   QTimer p1Timer;
+  QTimer m_ft8AutoBotSafetyTimer;
 
   QString m_path;
   QString m_baseCall;

@@ -12,6 +12,8 @@
 
 namespace
 {
+constexpr int kReplyToMeBonus = 125;
+
 extern "C"
 {
   void azdist_(char* MyGrid, char* HisGrid, double* utch, int* nAz, int* nEl,
@@ -165,6 +167,11 @@ FT8AutoBotSnapshot FT8AutoBot::snapshot() const
 void FT8AutoBot::onDecode(DecodedText const& decoded)
 {
   if (!enabled() || !isCurrentModeSupported()) return;
+  if (containsDirectedCall(decoded.string(), host_->myCall())) {
+    log(QStringLiteral("RX_MYCALL"), QStringLiteral("msg=%1")
+        .arg(decoded.string().trimmed()));
+  }
+  adoptHostQsoIfNeeded();
   if ((state_ == FT8AutoBotState::InQSO || state_ == FT8AutoBotState::AdoptingQSO)
       && hasActiveQso_
       && activeQsoShowsOtherPartner(decoded)) {
@@ -191,7 +198,7 @@ void FT8AutoBot::onDecode(DecodedText const& decoded)
   }
 
   if (mode_ == FT8AutoBotMode::SearchAndPounce) {
-    if (!candidate.isCqLike) {
+    if (!candidate.isCqLike && !candidate.isReplyToMe) {
       return;
     }
   } else {
@@ -223,9 +230,35 @@ void FT8AutoBot::onDecode(DecodedText const& decoded)
   }
 }
 
+void FT8AutoBot::onTransmitStarted(QString const& message, QDateTime const& nowUtc)
+{
+  if (!enabled() || !isCurrentModeSupported()) return;
+  adoptHostQsoIfNeeded();
+  if (state_ != FT8AutoBotState::InQSO || !hasActiveQso_ || activeQso_.inAdoptionGrace) return;
+
+  auto const text = QStringLiteral(" %1 ").arg(message.trimmed().toUpper());
+  auto const target = normalizedBase(activeQso_.call);
+  auto const myBase = normalizedBase(host_->myCall());
+  if (target.isEmpty()) return;
+  if (!text.contains(QStringLiteral(" %1 ").arg(target))) return;
+  if (!myBase.isEmpty() && !text.contains(QStringLiteral(" %1 ").arg(myBase))) return;
+
+  ++activeQso_.ownTxCycles;
+  counters_.activeQsoCycles = activeQso_.ownTxCycles;
+  log(QStringLiteral("STATE"), QStringLiteral("tx_attempt call=%1 tx_cycles=%2 progress=%3 msg=%4")
+      .arg(activeQso_.call,
+           QString::number(activeQso_.ownTxCycles),
+           QString::number(activeQso_.lastProgress),
+           message.trimmed()));
+  if (activeQso_.ownTxCycles >= settings_.stuckCycleLimit) {
+    abandonActiveQso(QStringLiteral("stuck"), nowUtc);
+  }
+}
+
 void FT8AutoBot::onPeriodBoundary(QDateTime const& nowUtc)
 {
   if (!enabled() || !isCurrentModeSupported()) return;
+  adoptHostQsoIfNeeded();
 
   if (state_ == FT8AutoBotState::Paused) {
     resumeFromPause();
@@ -263,14 +296,12 @@ void FT8AutoBot::onPeriodBoundary(QDateTime const& nowUtc)
 
   if (state_ == FT8AutoBotState::InQSO && hasActiveQso_ && !activeQso_.inAdoptionGrace) {
     ++activeQso_.sameStateCycles;
-    counters_.activeQsoCycles = activeQso_.sameStateCycles;
-    log(QStringLiteral("STATE"), QStringLiteral("qso call=%1 progress=%2 same_cycles=%3")
+    counters_.activeQsoCycles = activeQso_.ownTxCycles;
+    log(QStringLiteral("STATE"), QStringLiteral("qso call=%1 progress=%2 same_cycles=%3 tx_cycles=%4")
         .arg(activeQso_.call,
              QString::number(activeQso_.lastProgress),
-             QString::number(activeQso_.sameStateCycles)));
-    if (activeQso_.sameStateCycles > settings_.stuckCycleLimit) {
-      abandonActiveQso(QStringLiteral("stuck"), nowUtc);
-    }
+             QString::number(activeQso_.sameStateCycles),
+             QString::number(activeQso_.ownTxCycles)));
   }
 
   if (studyThresholdReached
@@ -376,6 +407,8 @@ void FT8AutoBot::onQsoProgress(int qsoProgress)
   activeQso_.lastProgress = qsoProgress;
   activeQso_.maxProgressSeen = qMax(activeQso_.maxProgressSeen, qsoProgress);
   activeQso_.sameStateCycles = 0;
+  activeQso_.ownTxCycles = 0;
+  counters_.activeQsoCycles = 0;
   if (state_ == FT8AutoBotState::AdoptingQSO) {
     activeQso_.inAdoptionGrace = false;
     state_ = FT8AutoBotState::InQSO;
@@ -650,8 +683,12 @@ FT8AutoBot::Candidate FT8AutoBot::buildCandidate(DecodedText const& decoded)
   if (candidate.isNewDx) {
     candidate.scoreNewDx = 500;
   }
+  if (candidate.isReplyToMe) {
+    candidate.scoreReplyToMe = kReplyToMeBonus;
+  }
   candidate.scoreDistance = distanceScore(candidate.grid);
-  candidate.totalScore = candidate.scoreNewCall + candidate.scoreNewDx + candidate.scoreDistance;
+  candidate.totalScore = candidate.scoreNewCall + candidate.scoreNewDx
+      + candidate.scoreReplyToMe + candidate.scoreDistance;
   return candidate;
 }
 
@@ -940,6 +977,20 @@ void FT8AutoBot::adoptExistingQso()
       .arg(snapshot_.targetCall, QString::number(activeQso_.adoptionPeriodsRemaining)));
 }
 
+void FT8AutoBot::adoptHostQsoIfNeeded()
+{
+  if (hasActiveQso_) return;
+  if (state_ == FT8AutoBotState::Disabled
+      || state_ == FT8AutoBotState::Paused
+      || state_ == FT8AutoBotState::Abandoning) {
+    return;
+  }
+  if (host_->dxCall().trimmed().isEmpty()) return;
+  if (host_->qsoProgress() == qsoProgressCallingValue()) return;
+
+  adoptExistingQso();
+}
+
 void FT8AutoBot::abandonActiveQso(QString const& reason, QDateTime const& nowUtc)
 {
   if (!hasActiveQso_) return;
@@ -952,8 +1003,11 @@ void FT8AutoBot::abandonActiveQso(QString const& reason, QDateTime const& nowUtc
   } else if (reason == QStringLiteral("qrm")) {
     ++counters_.abandonedQrm;
   }
+  auto const stuckCycles = reason == QStringLiteral("stuck")
+    ? activeQso_.ownTxCycles
+    : activeQso_.sameStateCycles;
   log(QStringLiteral("ABANDON"), QStringLiteral("call=%1 cycles=%2 reason=%3")
-      .arg(activeQso_.call, QString::number(activeQso_.sameStateCycles), reason));
+      .arg(activeQso_.call, QString::number(stuckCycles), reason));
   log(QStringLiteral("COOLDOWN"), QStringLiteral("call=%1 expires=%2 reason=%3")
       .arg(activeQso_.call,
            nowUtc.addSecs(settings_.cooldownMinutes * 60).toUTC().toString(Qt::ISODate),
@@ -1031,12 +1085,13 @@ QString FT8AutoBot::scoreDetail(Candidate const& candidate, QDateTime const& now
 {
   auto const ageSeconds = candidateAgeSeconds(candidate, nowUtc);
   auto const ageScore = candidateAgeScore(candidate, nowUtc);
-  return QStringLiteral("call=%1 country=%2 score=%3 new_call=%4 new_dx=%5 distance=%6 age_bonus=%7 old=%8 dist_km=%9 min=%10 rx=%11 report=%12")
+  return QStringLiteral("call=%1 country=%2 score=%3 new_call=%4 new_dx=%5 reply_to_me=%6 distance=%7 age_bonus=%8 old=%9 dist_km=%10 min=%11 rx=%12 report=%13")
     .arg(candidate.call,
          candidate.country,
          QString::number(candidate.totalScore + ageScore),
          QString::number(candidate.scoreNewCall),
          QString::number(candidate.scoreNewDx),
+         QString::number(candidate.scoreReplyToMe),
          QString::number(candidate.scoreDistance),
          QString::number(ageScore),
          QString::number(ageSeconds),

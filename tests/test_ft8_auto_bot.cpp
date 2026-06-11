@@ -274,6 +274,85 @@ private Q_SLOTS:
     QVERIFY(bot.memory().isOnCooldown(QStringLiteral("VK6XYZ")));
   }
 
+  void cq_stuck_limit_uses_bot_owned_tx_counter()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("DL1ASI"), QStringLiteral("Germany"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    auto settings = bot.settings();
+    settings.stuckCycleLimit = 3;
+    bot.setSettings(settings);
+    bot.setMode(FT8AutoBotMode::CQ);
+    bot.setEnabled(true);
+
+    auto const now = QDateTime::currentDateTimeUtc();
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ DL1ASI -19"), 1709)});
+    bot.onPeriodBoundary(now);
+
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(host.armedCall, QStringLiteral("DL1ASI"));
+
+    bot.onTransmitStarted(QStringLiteral("DL1ASI OH1ZZZ -19"), now.addSecs(15));
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(bot.counters().activeQsoCycles, 1);
+
+    bot.onTransmitStarted(QStringLiteral("DL1ASI OH1ZZZ -19"), now.addSecs(30));
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(bot.counters().activeQsoCycles, 2);
+
+    bot.onTransmitStarted(QStringLiteral("DL1ASI OH1ZZZ -19"), now.addSecs(45));
+    QCOMPARE(bot.state(), FT8AutoBotState::Idle);
+    QVERIFY(bot.memory().isOnCooldown(QStringLiteral("DL1ASI")));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("ABANDON:call=DL1ASI cycles=3 reason=stuck"));
+    }));
+  }
+
+  void cq_stuck_limit_ignores_unrelated_tx_text()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("DL1ASI"), QStringLiteral("Germany"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    auto settings = bot.settings();
+    settings.stuckCycleLimit = 2;
+    bot.setSettings(settings);
+    bot.setMode(FT8AutoBotMode::CQ);
+    bot.setEnabled(true);
+
+    auto const now = QDateTime::currentDateTimeUtc();
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ DL1ASI -19"), 1709)});
+    bot.onPeriodBoundary(now);
+
+    bot.onTransmitStarted(QStringLiteral("CQ OH1ZZZ KP20"), now.addSecs(15));
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(bot.counters().activeQsoCycles, 0);
+
+    bot.onTransmitStarted(QStringLiteral("DL1ASI OH1ZZZ -19"), now.addSecs(30));
+    QCOMPARE(bot.state(), FT8AutoBotState::InQSO);
+    QCOMPARE(bot.counters().activeQsoCycles, 1);
+  }
+
+  void decode_with_my_callsign_is_logged_to_bot_console()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.myCallValue = QStringLiteral("OH1ZZZ");
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+
+    auto const line = decodeLine(QStringLiteral("K2ABC OH1ZZZ -10"), 1500);
+    bot.onDecode(DecodedText {line});
+
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [&line] (QString const& entry) {
+      return entry == QStringLiteral("RX_MYCALL:msg=%1").arg(line);
+    }));
+  }
+
   void cq_reply_to_me_is_candidate_unrelated_cq_is_not()
   {
     QTemporaryDir dir;
@@ -314,6 +393,42 @@ private Q_SLOTS:
     bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
 
     QCOMPARE(host.armedCall, QStringLiteral("K3ABC"));
+  }
+
+  void sp_reply_to_me_is_candidate_without_cq()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("DL1ASI"), QStringLiteral("Germany"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ DL1ASI -19"), 1709)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(host.armedCall, QStringLiteral("DL1ASI"));
+  }
+
+  void sp_reply_to_me_gets_moderate_preference_over_cq()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.countriesByCall.insert(QStringLiteral("DL1ASI"), QStringLiteral("Germany"));
+    host.countriesByCall.insert(QStringLiteral("HB9HVG"), QStringLiteral("Switzerland"));
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setEnabled(true);
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("OH1ZZZ DL1ASI -19"), 1709)});
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("CQ HB9HVG JN36"), 2163)});
+    bot.onPeriodBoundary(QDateTime::currentDateTimeUtc());
+
+    QCOMPARE(host.armedCall, QStringLiteral("DL1ASI"));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.contains(QStringLiteral("SCORE:candidate call=DL1ASI"))
+          && entry.contains(QStringLiteral("reply_to_me=125"));
+    }));
   }
 
   void idle_tx_plan_uses_even_odd_specific_busy_bins()
@@ -702,6 +817,31 @@ private Q_SLOTS:
     QVERIFY(bot.memory().isOnCooldown(QStringLiteral("TC0HZR")));
     QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
       return entry.startsWith(QStringLiteral("QRM:call=TC0HZR"));
+    }));
+  }
+
+  void lost_active_state_is_readopted_before_qrm_detection()
+  {
+    QTemporaryDir dir;
+    FakeHost host;
+    host.myCallValue = QStringLiteral("OH3CUF");
+
+    FT8AutoBot bot {&host, QDir {dir.path()}};
+    bot.setMode(FT8AutoBotMode::CQ);
+    bot.setEnabled(true);
+
+    host.dxCallValue = QStringLiteral("EA3BBA");
+    host.qsoProgressValue = 2;
+
+    bot.onDecode(DecodedText {decodeLine(QStringLiteral("DH1KJ EA3BBA R+01"), 626)});
+
+    QCOMPARE(bot.state(), FT8AutoBotState::Idle);
+    QVERIFY(bot.memory().isOnCooldown(QStringLiteral("EA3BBA")));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("STATE:enter AdoptingQSO call=EA3BBA"));
+    }));
+    QVERIFY(std::any_of(host.logEntries.begin(), host.logEntries.end(), [] (QString const& entry) {
+      return entry.startsWith(QStringLiteral("QRM:call=EA3BBA"));
     }));
   }
 

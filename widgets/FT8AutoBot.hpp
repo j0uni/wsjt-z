@@ -137,6 +137,7 @@ public:
   FT8AutoBotSnapshot snapshot() const;
 
   void onDecode(DecodedText const& decoded);
+  void onTransmitStarted(QString const& message, QDateTime const& nowUtc = QDateTime::currentDateTimeUtc());
   void onPeriodBoundary(QDateTime const& nowUtc = QDateTime::currentDateTimeUtc());
   void onQsoProgress(int qsoProgress);
   void onQsoLogged(QString const& call, QString const& band, QString const& mode);
@@ -169,6 +170,7 @@ private:
     int seenCycleIndex {0};
     int scoreNewCall {0};
     int scoreNewDx {0};
+    int scoreReplyToMe {0};
     int scoreDistance {0};
     int totalScore {0};
   };
@@ -181,6 +183,7 @@ private:
     int lastProgress {0};
     int maxProgressSeen {0};
     int sameStateCycles {0};
+    int ownTxCycles {0};
     bool inAdoptionGrace {false};
     int adoptionPeriodsRemaining {0};
   };
@@ -205,6 +208,7 @@ private:
   void armCandidate(Candidate const& candidate);
   void startActiveQso(QString const& call);
   void adoptExistingQso();
+  void adoptHostQsoIfNeeded();
   void abandonActiveQso(QString const& reason, QDateTime const& nowUtc);
   void clearCycleCandidates();
   void backfillWorkedFromLogBook();

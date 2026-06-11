@@ -1038,6 +1038,15 @@ MainWindow::MainWindow(QDir const& temp_directory, bool multiple,
   TxAgainTimer.setSingleShot(true);
   connect(&TxAgainTimer, SIGNAL(timeout()), this, SLOT(TxAgain()));
 
+  m_ft8AutoBotSafetyTimer.setSingleShot(true);
+  connect(&m_ft8AutoBotSafetyTimer, &QTimer::timeout, this, [this] {
+    if (!m_ft8AutoBot || !m_ft8AutoBot->enabled()) return;
+    appendFT8AutoBotLog("SAFETY", QStringLiteral("Auto-disabled after 2 hours; manual re-enable required"));
+    statusBar()->showMessage(tr("FT8 Auto Bot auto-disabled after 2 hours"), 5000);
+    auto_tx_mode(false);
+    setFT8AutoBotEnabled(false);
+  });
+
   connect(m_wideGraph.data (), SIGNAL(setFreq3(int,int)),this,
           SLOT(setFreq4(int,int)));
 
@@ -6486,6 +6495,7 @@ void MainWindow::guiUpdate()
                                 .arg(ui->dxCallEntry->text().trimmed(), txText));
           }
           appendFT8AutoBotLog("TX", QStringLiteral("msg=%1").arg(m_currentMessage.trimmed()));
+          m_ft8AutoBot->onTransmitStarted(m_currentMessage.trimmed(), QDateTime::currentDateTimeUtc());
         }
         if(!m_tune) write_all("Tx",m_currentMessage);
         if (m_config.TX_messages () && !m_tune && SpecOp::FOX!=m_specOp)
@@ -14934,7 +14944,11 @@ void MainWindow::setFT8AutoBotEnabled(bool enabled)
         ui->cb_autoCallNext->setEnabled(false);
         ui->cbAutoSeq->setChecked(true);
         m_ft8AutoBot->setEnabled(true);
+        m_ft8AutoBotSafetyTimer.start(2 * 60 * 60 * 1000);
+        appendFT8AutoBotLog("SAFETY", QStringLiteral("Safety timeout started duration_min=120"));
     } else {
+        m_ft8AutoBotSafetyTimer.stop();
+        auto_tx_mode(false);
         m_ft8AutoBot->setEnabled(false);
         restoreFT8AutoBotControls();
     }
